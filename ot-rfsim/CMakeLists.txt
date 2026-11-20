@@ -53,11 +53,28 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(OT_BUILD_EXECUTABLES OFF CACHE BOOL "" FORCE)
     set(OT_FTD ON CACHE BOOL "" FORCE)
     set(OT_MTD OFF CACHE BOOL "" FORCE)
-    set(OT_RCP OFF CACHE BOOL "" FORCE)
+    set(OT_RCP ON CACHE BOOL "" FORCE)
     set(OT_15_4 ON CACHE BOOL "" FORCE)
     set(OT_PING_SENDER ON CACHE BOOL "" FORCE)
     set(OT_BUILTIN_MBEDTLS ON CACHE BOOL "" FORCE)
     set(OT_COMPILE_WARNING_AS_ERROR OFF CACHE BOOL "" FORCE)
+    option(OT_RFSIM_TREL "Enable TREL over OTNS v3 virtual backbone in standalone ot-rfsim build" OFF)
+    option(OT_RFSIM_BORDER_ROUTING "Enable Border Routing (Infra-If AIL) in standalone ot-rfsim build" OFF)
+    if(OT_RFSIM_TREL)
+        set(OT_TREL ON CACHE BOOL "" FORCE)
+        set(OT_UPTIME ON CACHE BOOL "" FORCE)
+    endif()
+    if(OT_RFSIM_BORDER_ROUTING)
+        set(OT_BORDER_ROUTER ON CACHE BOOL "" FORCE)
+        set(OT_BORDER_ROUTING ON CACHE BOOL "" FORCE)
+        set(OT_ECDSA ON CACHE BOOL "" FORCE)
+        set(OT_EXTERNAL_HEAP ON CACHE BOOL "" FORCE)
+        set(OT_NETDATA_PUBLISHER ON CACHE BOOL "" FORCE)
+        set(OT_SERVICE ON CACHE BOOL "" FORCE)
+        set(OT_SLAAC ON CACHE BOOL "" FORCE)
+        set(OT_SRP_CLIENT ON CACHE BOOL "" FORCE)
+        set(OT_SRP_SERVER ON CACHE BOOL "" FORCE)
+    endif()
     add_subdirectory(${OT_DIR} ${CMAKE_CURRENT_BINARY_DIR}/openthread EXCLUDE_FROM_ALL)
 else()
     set(OTNS_ROOT_DIR "${CMAKE_SOURCE_DIR}")
@@ -112,4 +129,71 @@ target_link_libraries(ot-cli-ftd-rfsim
 )
 if(TARGET otns_build_options)
     target_link_libraries(ot-cli-ftd-rfsim PRIVATE otns_build_options)
+endif()
+
+# RCP platform library & standalone Spinel/HDLC RCP binary (for OTBR / POSIX host)
+if(TARGET openthread-rcp AND TARGET openthread-radio)
+    add_library(openthread-rfsim-v3-rcp STATIC
+        src/rfsim_client.cpp
+        ${OT_DIR}/examples/platforms/utils/mac_frame.cpp
+    )
+    target_include_directories(openthread-rfsim-v3-rcp
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${OT_DIR}/examples/platforms
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${OT_DIR}/include
+            ${OT_DIR}/src
+            ${OT_DIR}/src/core
+            ${OT_DIR}/examples/platforms/utils
+    )
+    target_link_libraries(openthread-rfsim-v3-rcp
+        PUBLIC
+            otns_protocol
+            ot-config-radio
+            ot-config
+    )
+    target_compile_definitions(openthread-rfsim-v3-rcp
+        PUBLIC
+            OPENTHREAD_RADIO=1
+            OPENTHREAD_FTD=0
+            OPENTHREAD_MTD=0
+    )
+    target_compile_definitions(ot-config-radio
+        INTERFACE
+            OPENTHREAD_CONFIG_MAC_SOFTWARE_CSMA_BACKOFF_ENABLE=1
+            OPENTHREAD_CONFIG_MAC_SOFTWARE_RETRANSMIT_ENABLE=1
+    )
+    if(TARGET otns_build_options)
+        target_link_libraries(openthread-rfsim-v3-rcp PRIVATE otns_build_options)
+    endif()
+
+    add_executable(ot-rcp-rfsim
+        src/main_rcp.cpp
+    )
+    target_include_directories(ot-rcp-rfsim
+        PRIVATE
+            ${OT_DIR}/include
+            ${OT_DIR}/src
+            ${OT_DIR}/src/core
+            ${OT_DIR}/examples/platforms
+    )
+    target_link_libraries(ot-rcp-rfsim
+        PRIVATE
+            "$<LINK_LIBRARY:WHOLE_ARCHIVE,openthread-rfsim-v3-rcp>"
+            openthread-rcp
+            openthread-radio
+            ot-config-radio
+            ot-config
+    )
+    target_compile_definitions(ot-rcp-rfsim
+        PRIVATE
+            OPENTHREAD_RADIO=1
+            OPENTHREAD_FTD=0
+            OPENTHREAD_MTD=0
+    )
+    if(TARGET otns_build_options)
+        target_link_libraries(ot-rcp-rfsim PRIVATE otns_build_options)
+    endif()
 endif()

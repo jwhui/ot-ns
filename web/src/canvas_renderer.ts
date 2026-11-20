@@ -269,6 +269,46 @@ export class TopologyRenderer {
       const hasOuterRing = n.id === this.selectedNodeId || n.kind === "external";
       ctx.fillStyle = "#e2e8f0";
       ctx.fillText(String(n.id), sx, sy + radius + (hasOuterRing ? 19 : 15));
+
+      // Optional application / external node badge pill (e.g. matter, otbr, rcp)
+      if (n.label) {
+        const tag = n.label.length > 14 ? `${n.label.slice(0, 13)}…` : n.label;
+        ctx.save();
+        ctx.font = "600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+        const textW = ctx.measureText(tag).width;
+        const padX = 5;
+        const pillW = textW + padX * 2;
+        const pillH = 14;
+        const px = sx - pillW / 2;
+        const py = sy - radius - (hasOuterRing ? 24 : 20);
+        const r = 4;
+
+        ctx.beginPath();
+        ctx.moveTo(px + r, py);
+        ctx.lineTo(px + pillW - r, py);
+        ctx.quadraticCurveTo(px + pillW, py, px + pillW, py + r);
+        ctx.lineTo(px + pillW, py + pillH - r);
+        ctx.quadraticCurveTo(px + pillW, py + pillH, px + pillW - r, py + pillH);
+        ctx.lineTo(px + r, py + pillH);
+        ctx.quadraticCurveTo(px, py + pillH, px, py + pillH - r);
+        ctx.lineTo(px, py + r);
+        ctx.quadraticCurveTo(px, py, px + r, py);
+        ctx.closePath();
+
+        const isMatter = n.label.toLowerCase().startsWith("matter");
+        const accent = isMatter ? "#38bdf8" : n.kind === "external" ? "#c084fc" : "#94a3b8";
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(tag, sx, py + pillH / 2 + 0.5);
+        ctx.restore();
+      }
     }
   }
 

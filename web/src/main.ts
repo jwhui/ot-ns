@@ -92,8 +92,10 @@ function updateInspector(): void {
   const n = nodes.get(selectedNodeId)!;
   const rlocHex = n.rloc16 !== undefined ? `0x${n.rloc16.toString(16).padStart(4, "0")}` : "—";
   const partHex = n.partition_id !== undefined ? `0x${n.partition_id.toString(16).padStart(8, "0")}` : "—";
+  const tagPart = n.label ? ` · ${n.label}` : "";
   nodeDetails.textContent =
-    `Node #${n.id} (${n.kind ?? "inproc"})\n` +
+    `Node #${n.id} (${n.kind ?? "inproc"}${tagPart})\n` +
+    (n.label ? `Label:     ${n.label}\n` : "") +
     `Role:      ${n.role}${n.failed ? " (DISABLED)" : ""}\n` +
     `RLOC16:    ${rlocHex}\n` +
     `Partition: ${partHex}\n` +

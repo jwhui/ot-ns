@@ -31,9 +31,11 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "core/simulation.hpp"
 #include "nlohmann/json.hpp"
+#include "nodes/rfsim_server.hpp"
 #include "server/replay.hpp"
 #include "server/viz_publisher.hpp"
 #include "server/ws_server.hpp"
@@ -52,9 +54,14 @@ public:
                WsServer                    &aServer,
                VizPublisher                &aViz,
                JsonlRecorder               &aRecorder,
-               const std::filesystem::path &aOutputDir);
+               const std::filesystem::path &aOutputDir,
+               Nodes::RfSimServer          *aRfSimServer = nullptr);
 
     void HandleMessage(ClientId aClientId, const std::string &aMessage);
+
+    void                                      AddAllowedSpawnPath(const std::filesystem::path &aPath);
+    const std::vector<std::filesystem::path> &GetAllowedSpawnPaths(void) const { return mAllowedSpawnPaths; }
+    Nodes::RfSimServer                       *GetRfSimServer(void) const { return mRfSimServer; }
 
     bool IsPaused(void) const { return mPaused; }
     void SetPaused(bool aPaused) { mPaused = aPaused; }
@@ -71,13 +78,15 @@ private:
     static nlohmann::json MakeResult(const nlohmann::json &aId, nlohmann::json aResult);
     static nlohmann::json MakeError(const nlohmann::json &aId, const char *aCode, const std::string &aMessage);
 
-    Core::Simulation     &mSim;
-    WsServer             &mServer;
-    VizPublisher         &mViz;
-    JsonlRecorder        &mRecorder;
-    std::filesystem::path mOutputDir;
-    bool                  mPaused        = true;
-    bool                  mQuitRequested = false;
+    Core::Simulation                  &mSim;
+    WsServer                          &mServer;
+    VizPublisher                      &mViz;
+    JsonlRecorder                     &mRecorder;
+    std::filesystem::path              mOutputDir;
+    Nodes::RfSimServer                *mRfSimServer = nullptr;
+    std::vector<std::filesystem::path> mAllowedSpawnPaths;
+    bool                               mPaused        = true;
+    bool                               mQuitRequested = false;
 };
 
 } // namespace Server

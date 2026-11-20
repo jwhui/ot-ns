@@ -121,6 +121,7 @@ RfSimNode::RfSimNode(Core::Simulation       &aSim,
     , mId(aId)
     , mPos(aConfig.mPos)
     , mRadioRange(aConfig.mRadioRange)
+    , mLabel(aConfig.mLabel)
     , mSockFd(aSocketFd)
     , mChildPid(aChildPid)
     , mAliveFlag(std::make_shared<bool>(true))
@@ -203,6 +204,91 @@ void RfSimNode::ReapChildProcess(void)
 }
 
 bool RfSimNode::CompleteInitialSync(void) { return PumpUntilStepDone(); }
+
+void RfSimNode::PollExternal(void)
+{
+    if (mSockFd < 0 || mDisconnected || !mEnabled)
+    {
+        return;
+    }
+
+    // Drain any unsolicited asynchronous frames (e.g., from an RCP driven by otbr-agent/POSIX host).
+    while (!mDisconnected)
+    {
+        struct pollfd pfd;
+
+        pfd.fd      = mSockFd;
+        pfd.events  = POLLIN;
+        pfd.revents = 0;
+
+        int pr = ::poll(&pfd, 1, 0);
+
+        if (pr < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            mDisconnected = true;
+            return;
+        }
+        if (pr == 0)
+        {
+            break;
+        }
+
+        uint8_t tmp[4096];
+        ssize_t n = ::recv(mSockFd, tmp, sizeof(tmp), 0);
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            mDisconnected = true;
+            return;
+        }
+        if (n == 0)
+        {
+            mDisconnected = true;
+            return;
+        }
+
+        if (mRxBuffer.size() + static_cast<size_t>(n) > kMaxRxBufferBytes)
+        {
+            mDisconnected = true;
+            return;
+        }
+
+        mRxBuffer.insert(mRxBuffer.end(), tmp, tmp + n);
+
+        while (!mRxBuffer.empty() && !mDisconnected)
+        {
+            Protocol::DecodeResult res = Protocol::DecodeFrame(mRxBuffer.data(), mRxBuffer.size());
+
+            if (res.mStatus == Protocol::DecodeStatus::kNeedMoreData)
+            {
+                break;
+            }
+            if (res.mStatus != Protocol::DecodeStatus::kOk)
+            {
+                mDisconnected = true;
+                return;
+            }
+
+            mRxBuffer.erase(mRxBuffer.begin(), mRxBuffer.begin() + static_cast<std::ptrdiff_t>(res.mBytesConsumed));
+
+            bool sawStepDone = false;
+
+            if (!HandleIncomingFrame(res.mFrame, sawStepDone, nullptr))
+            {
+                mDisconnected = true;
+                return;
+            }
+        }
+    }
+}
 
 void RfSimNode::SetEnabled(bool aEnabled)
 {
@@ -565,12 +651,67 @@ bool RfSimNode::HandleIncomingFrame(const Protocol::Frame &aFrame, bool &aSawSte
         return true;
     }
 
+    case Protocol::MsgType::kTrelPeer:
+    {
+        if ((aFrame.mFlags & Protocol::kFlagCancel) != 0)
+        {
+            mSim.UnregisterTrelPeer(mId);
+        }
+        else
+        {
+            auto                 addr = aFrame.GetNetAddr();
+            const Protocol::Tlv *txt  = aFrame.FindTlv(Protocol::TlvType::kPayload);
+            uint16_t             port = addr.has_value() ? addr->mSrcPort : 0;
+            std::vector<uint8_t> txtData;
+
+            if (txt != nullptr)
+            {
+                txtData = txt->mValue;
+            }
+            mSim.RegisterTrelPeer(mId, port, txtData);
+        }
+        return true;
+    }
+
+    case Protocol::MsgType::kInfraIfState:
+    {
+        if ((aFrame.mFlags & Protocol::kFlagCancel) != 0)
+        {
+            mSim.LeaveInfraIf(mId);
+        }
+        else
+        {
+            mSim.JoinInfraIf(mId);
+        }
+        return true;
+    }
+
     case Protocol::MsgType::kTrelPacket:
     case Protocol::MsgType::kInfraIfPacket:
     case Protocol::MsgType::kHostSocket:
     {
         auto                 addr    = aFrame.GetNetAddr();
         const Protocol::Tlv *payload = aFrame.FindTlv(Protocol::TlvType::kPayload);
+
+        if (aFrame.mType == Protocol::MsgType::kHostSocket)
+        {
+            if ((aFrame.mFlags & Protocol::kFlagCancel) != 0)
+            {
+                if (addr.has_value() && addr->mSrcPort != 0)
+                {
+                    mSim.GetNetFabric().UnbindHostUdp(mId, addr->mSrcPort);
+                }
+                return true;
+            }
+            if (payload == nullptr)
+            {
+                if (addr.has_value() && addr->mSrcPort != 0)
+                {
+                    mSim.GetNetFabric().BindHostUdp(mId, addr->mSrcPort);
+                }
+                return true;
+            }
+        }
 
         if (addr.has_value() && payload != nullptr)
         {
@@ -593,6 +734,10 @@ bool RfSimNode::HandleIncomingFrame(const Protocol::Frame &aFrame, bool &aSawSte
             }
             else
             {
+                if (pkt.mSrcPort != 0)
+                {
+                    mSim.GetNetFabric().BindHostUdp(mId, pkt.mSrcPort);
+                }
                 mSim.SendHostUdpPacket(pkt);
             }
         }
@@ -648,6 +793,7 @@ Core::NodeSnapshot RfSimNode::GetSnapshot(void) const
     snap.mRloc16      = mRloc16;
     snap.mPartitionId = mPartitionId;
     snap.mExtAddr     = mExtAddr;
+    snap.mLabel       = mLabel;
     snap.mEnabled     = mEnabled && !mDisconnected;
 
     return snap;
@@ -697,6 +843,33 @@ void RfSimNode::OnTrelPacket(const Core::NetPacket &aPacket)
     msg.mTimestampUs = mSim.GetNowUs();
     msg.AddNetAddr(addr);
     msg.AddBytes(Protocol::TlvType::kPayload, aPacket.mPayload.data(), aPacket.mPayload.size());
+    if (SendFrame(msg))
+    {
+        (void)PumpUntilStepDone();
+    }
+}
+
+void RfSimNode::OnTrelPeerChange(const Core::TrelPeerRecord &aPeer, bool aRemoved)
+{
+    if (!mEnabled || mDisconnected)
+    {
+        return;
+    }
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = aPeer.mUdpPort;
+    addr.mSrcIp6  = aPeer.mIp6Addr;
+
+    msg.mType        = Protocol::MsgType::kTrelPeer;
+    msg.mFlags       = aRemoved ? Protocol::kFlagCancel : 0;
+    msg.mTimestampUs = mSim.GetNowUs();
+    msg.AddNetAddr(addr);
+    if (!aRemoved && !aPeer.mTxtData.empty())
+    {
+        msg.AddBytes(Protocol::TlvType::kPayload, aPeer.mTxtData.data(), aPeer.mTxtData.size());
+    }
     if (SendFrame(msg))
     {
         (void)PumpUntilStepDone();

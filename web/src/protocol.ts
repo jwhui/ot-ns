@@ -22,6 +22,7 @@ export interface NodeState {
   radio_range?: number;
   failed?: boolean;
   kind?: "inproc" | "external";
+  label?: string;
 }
 
 export interface LinkState {

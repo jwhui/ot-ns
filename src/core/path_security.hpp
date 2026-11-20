@@ -31,6 +31,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace otns {
 namespace Core {
@@ -51,6 +52,20 @@ bool ResolveContainedPath(const std::filesystem::path &aBaseDir,
                           const std::string           &aRequestedPath,
                           std::filesystem::path       &aOutPath,
                           bool                         aAllowSymlink = false);
+
+/**
+ * Resolves and validates an executable path against an explicit allowlist of canonical
+ * file or directory paths. Rejects non-regular files, non-executable files, `..` traversal,
+ * NUL bytes, and anything outside @p aAllowedPaths.
+ */
+bool ResolveAllowedExecutable(const std::vector<std::filesystem::path> &aAllowedPaths,
+                              const std::string                        &aRequestedPath,
+                              std::filesystem::path                    &aOutPath);
+
+/**
+ * Sanitizes an optional user/peer node label to at most 32 safe ASCII characters.
+ */
+std::string SanitizeNodeLabel(const std::string &aRaw);
 
 } // namespace Core
 } // namespace otns

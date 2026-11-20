@@ -122,6 +122,7 @@ public:
     void     AdvanceUs(uint64_t aDurationUs);
     void     AdvanceSec(double aSeconds);
     void     AdvancePacedUs(uint64_t aDurationUs, double aSpeed);
+    void     PollExternalNodes(void);
     void     SetSpeed(double aSpeed) { mConfig.mSpeed = (aSpeed >= 0.0) ? aSpeed : 0.0; }
     double   GetSpeed(void) const { return mConfig.mSpeed; }
     uint64_t GetNowUs(void) const { return mScheduler.GetNowUs(); }
@@ -140,6 +141,10 @@ public:
 
     // Virtual Backbone Fabric (TREL / Infra-If / Host UDP)
     NetFabric &GetNetFabric(void) { return mNetFabric; }
+    void       RegisterTrelPeer(Rf::NodeId aNodeId, uint16_t aUdpPort, const std::vector<uint8_t> &aTxtData);
+    void       UnregisterTrelPeer(Rf::NodeId aNodeId);
+    void       JoinInfraIf(Rf::NodeId aNodeId);
+    void       LeaveInfraIf(Rf::NodeId aNodeId);
     void       SendTrelPacket(const NetPacket &aPacket);
     void       SendInfraIfPacket(const NetPacket &aPacket);
     void       SendHostUdpPacket(const NetPacket &aPacket);
@@ -182,7 +187,8 @@ private:
         Simulation *mPrev;
     };
 
-    void DrainTasklets(void);
+    void                        DrainTasklets(void);
+    NetFabric::TrelPeerCallback MakeTrelPeerCallback(void);
     void CompleteRadioTx(Rf::NodeId aSrcId, const RawFrame &aTxFrame, bool aAckRequested, TxDoneCallback aOnTxDone);
 
     static thread_local Simulation *sCurrentSim;

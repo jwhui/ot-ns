@@ -96,6 +96,7 @@ private:
         bool             mFailed      = false;
         Core::NodeKind   mKind        = Core::NodeKind::kInProc;
         std::string      mExtAddr;
+        std::string      mLabel;
     };
 
     struct LinkKey

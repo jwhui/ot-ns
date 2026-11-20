@@ -95,7 +95,7 @@ bool VizPublisher::CachedNode::operator==(const CachedNode &aOther) const
            std::abs(mZ - aOther.mZ) < 1e-6 && mRole == aOther.mRole && mRloc16 == aOther.mRloc16 &&
            mParentId == aOther.mParentId && mPartitionId == aOther.mPartitionId &&
            std::abs(mRadioRange - aOther.mRadioRange) < 1e-6 && mFailed == aOther.mFailed && mKind == aOther.mKind &&
-           mExtAddr == aOther.mExtAddr;
+           mExtAddr == aOther.mExtAddr && mLabel == aOther.mLabel;
 }
 
 bool VizPublisher::LinkKey::operator<(const LinkKey &aOther) const
@@ -152,6 +152,7 @@ void VizPublisher::ComputeCurrentState(std::map<Rf::NodeId, CachedNode> &aNodes,
         cn.mFailed      = !snap.mEnabled;
         cn.mKind        = snap.mKind;
         cn.mExtAddr     = snap.mExtAddr;
+        cn.mLabel       = snap.mLabel;
 
         if (snap.mParentRloc16 != 0xFFFE)
         {
@@ -207,6 +208,10 @@ nlohmann::json VizPublisher::NodeToJson(const CachedNode &aNode)
     obj["radio_range"]  = aNode.mRadioRange;
     obj["failed"]       = aNode.mFailed;
     obj["kind"]         = (aNode.mKind == Core::NodeKind::kExternal) ? "external" : "inproc";
+    if (!aNode.mLabel.empty())
+    {
+        obj["label"] = aNode.mLabel;
+    }
 
     return obj;
 }

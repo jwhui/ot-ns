@@ -30,8 +30,10 @@
 #define OTNS_OT_RFSIM_CLIENT_HPP_
 
 #include <openthread/instance.h>
+#include <openthread/platform/infra_if.h>
 #include <openthread/platform/logging.h>
 #include <openthread/platform/radio.h>
+#include <openthread/platform/trel.h>
 
 #include <array>
 #include <cstdint>
@@ -56,6 +58,7 @@ class Client
 public:
     static Client &Get(void);
 
+    void SetAppName(const std::string &aName);
     void Configure(const std::string &aEndpoint, uint32_t aNodeId, uint64_t aSeed);
     bool Connect(void);
     void Disconnect(void);
@@ -73,6 +76,51 @@ public:
 
     void ProcessDrivers(otInstance *aInstance);
     void ProcessReadySocket(otInstance *aInstance);
+    void ProcessPendingWork(otInstance *aInstance);
+    bool HasPendingWork(otInstance *aInstance) const;
+    void ResetForPseudoReset(void);
+
+    // Virtual backbone hooks (TREL / Infra-If AIL / Host UDP)
+    bool GetInfraIfLinkLocalAddress(uint8_t aAddr[16]) const;
+    bool GetBackboneAddress(uint8_t aAddr[16]) const;
+
+    void SetTrelPacketHandler(otRfSimPacketCallback aCallback, void *aContext);
+    void SetInfraIfPacketHandler(otRfSimPacketCallback aCallback, void *aContext);
+    void SetHostUdpPacketHandler(otRfSimPacketCallback aCallback, void *aContext);
+
+    void TrelEnable(uint16_t *aUdpPort);
+    void TrelDisable(void);
+    bool TrelRegisterService(uint16_t aPort, const uint8_t *aTxtData, uint16_t aTxtLength);
+    bool TrelSend(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength);
+    const otPlatTrelCounters *TrelGetCounters(void) const { return &mTrelCounters; }
+    void                      TrelResetCounters(void);
+
+    bool    InfraIfInit(otInstance *aInstance, uint32_t aInfraIfIndex);
+    void    InfraIfDeinit(otInstance *aInstance);
+    bool    InfraIfHasAddress(uint32_t aInfraIfIndex, const otIp6Address *aAddress);
+    otError InfraIfSendIcmp6Nd(uint32_t            aInfraIfIndex,
+                               const otIp6Address *aDestAddress,
+                               const uint8_t      *aBuffer,
+                               uint16_t            aBufferLength);
+    bool    InfraIfSendPacket(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength);
+    otError InfraIfGetLinkLayerAddress(uint32_t aInfraIfIndex, otPlatInfraIfLinkLayerAddress *aAddr);
+    void    InfraIfDhcp6PdSetListening(bool aEnable, uint32_t aInfraIfIndex);
+    void    InfraIfDhcp6PdSend(otMessage *aMessage, const otIp6Address *aDestAddress, uint32_t aInfraIfIndex);
+
+    bool HostUdpBind(uint16_t aPort);
+    bool HostUdpUnbind(uint16_t aPort);
+    bool HostUdpSend(uint16_t       aSrcPort,
+                     const uint8_t  aDstIp6[16],
+                     uint16_t       aDstPort,
+                     const uint8_t *aPayload,
+                     uint16_t       aLength);
+
+    // Spinel UART platform hooks (used by ot-rcp-rfsim)
+    otError UartEnable(void);
+    otError UartDisable(void);
+    otError UartSend(const uint8_t *aBuf, uint16_t aBufLength);
+    otError UartFlush(void);
+    bool    IsUartEnabled(void) const { return mUartEnabled; }
 
     // Alarm platform hooks
     void StartAlarmMilliAt(uint32_t aT0Ms, uint32_t aDtMs);
@@ -151,7 +199,10 @@ private:
     void SendRadioState(void);
     void SendStepDone(const std::vector<uint8_t> *aAckPsdu = nullptr);
     bool HasFramePendingFor(const otMacAddress &aSrcAddr) const;
+    void FlushUartNonBlocking(void);
+    void EnsureInfraIfJoined(uint32_t aInfraIfIndex);
 
+    std::string mAppName = "ot-rfsim-v3";
     std::string mEndpoint;
     uint32_t    mNodeId               = 0;
     uint64_t    mPrngState            = 1;
@@ -195,6 +246,27 @@ private:
     std::vector<std::array<uint8_t, 8>>          mSrcMatchExt;
 
     std::map<uint16_t, std::vector<std::vector<uint8_t>>> mSettings;
+
+    // Spinel UART state (RCP mode)
+    bool           mUartEnabled = false;
+    int            mUartInFd    = -1;
+    int            mUartOutFd   = -1;
+    const uint8_t *mUartTxBuf   = nullptr;
+    uint16_t       mUartTxLen   = 0;
+
+    // Virtual backbone state (TREL / Infra-If AIL / Host UDP)
+    bool                  mTrelEnabled           = false;
+    uint16_t              mTrelPort              = 0;
+    otPlatTrelCounters    mTrelCounters          = {};
+    bool                  mInfraIfEnabled        = false;
+    uint32_t              mInfraIfIndex          = 1;
+    bool                  mDhcp6PdListening      = false;
+    otRfSimPacketCallback mTrelPacketCallback    = nullptr;
+    void                 *mTrelPacketContext     = nullptr;
+    otRfSimPacketCallback mInfraIfPacketCallback = nullptr;
+    void                 *mInfraIfPacketContext  = nullptr;
+    otRfSimPacketCallback mHostUdpPacketCallback = nullptr;
+    void                 *mHostUdpPacketContext  = nullptr;
 };
 
 } // namespace RfSim

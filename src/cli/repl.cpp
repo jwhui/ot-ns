@@ -33,6 +33,7 @@
 #include <sstream>
 #include <vector>
 
+#include "core/path_security.hpp"
 #include "core/topology.hpp"
 
 namespace otns {
@@ -156,6 +157,7 @@ bool Repl::ExecuteLine(const std::string &aLine, std::ostream &aOut)
     {
         aOut << "OTNS v3 Interactive Commands:\n"
              << "  add <router|fed|med|sed> [x y [z]]  Add an in-process Thread node\n"
+             << "  spawn <exe> [otns|matter|raw] [label] [x y]  Spawn an external ot-rfsim v3 node\n"
              << "  del <id>                            Remove a node\n"
              << "  move <id> <x> <y> [z]               Move a node\n"
              << "  enable|disable <id>                 Enable or disable a node\n"
@@ -195,6 +197,84 @@ bool Repl::ExecuteLine(const std::string &aLine, std::ostream &aOut)
         }
 
         Rf::NodeId id = mSim.AddNode(cfg);
+
+        mViz.PublishDiffIfDue(mRpc.IsPaused(), true);
+        aOut << id << "\nDone\n";
+        return true;
+    }
+
+    if (cmd == "spawn" && tokens.size() >= 2)
+    {
+        Nodes::RfSimServer *rfsim = mRpc.GetRfSimServer();
+
+        if (rfsim == nullptr || !rfsim->IsListening())
+        {
+            aOut << "Error: start otns with --rfsim-socket or --rfsim-tcp to spawn external nodes\n";
+            return true;
+        }
+        if (mRpc.GetAllowedSpawnPaths().empty())
+        {
+            aOut << "Error: start otns with --allow-spawn <dir-or-file> to allow spawning external nodes\n";
+            return true;
+        }
+
+        std::filesystem::path resolvedExe;
+
+        if (!Core::ResolveAllowedExecutable(mRpc.GetAllowedSpawnPaths(), tokens[1], resolvedExe))
+        {
+            aOut << "Error: executable not permitted by --allow-spawn allowlist\n";
+            return true;
+        }
+
+        Nodes::SpawnArgStyle argStyle = Nodes::SpawnArgStyle::kOtns;
+        Core::NodeConfig     cfg;
+        size_t               idx = 2;
+
+        if (idx < tokens.size())
+        {
+            if (tokens[idx] == "otns")
+            {
+                argStyle = Nodes::SpawnArgStyle::kOtns;
+                ++idx;
+            }
+            else if (tokens[idx] == "matter")
+            {
+                argStyle = Nodes::SpawnArgStyle::kMatter;
+                ++idx;
+            }
+            else if (tokens[idx] == "raw")
+            {
+                argStyle = Nodes::SpawnArgStyle::kRaw;
+                ++idx;
+            }
+        }
+        cfg.mAutoStart = (argStyle == Nodes::SpawnArgStyle::kOtns);
+
+        // Optional non-numeric label token before coordinates.
+        if (idx < tokens.size())
+        {
+            char *endPtr = nullptr;
+
+            (void)std::strtod(tokens[idx].c_str(), &endPtr);
+            if (endPtr == tokens[idx].c_str() || *endPtr != '\0')
+            {
+                cfg.mLabel = Core::SanitizeNodeLabel(tokens[idx]);
+                ++idx;
+            }
+        }
+        if (idx + 1 < tokens.size())
+        {
+            cfg.mPos.mX = std::strtod(tokens[idx].c_str(), nullptr);
+            cfg.mPos.mY = std::strtod(tokens[idx + 1].c_str(), nullptr);
+        }
+
+        Rf::NodeId id = rfsim->SpawnExternalNode(resolvedExe.string(), cfg, {}, 5000, argStyle);
+
+        if (id == Rf::kInvalidNodeId)
+        {
+            aOut << "Error: spawned process failed to connect to ot-rfsim v3 endpoint\n";
+            return true;
+        }
 
         mViz.PublishDiffIfDue(mRpc.IsPaused(), true);
         aOut << id << "\nDone\n";
@@ -309,11 +389,16 @@ bool Repl::ExecuteLine(const std::string &aLine, std::ostream &aOut)
         {
             char buf[256];
 
-            std::snprintf(buf, sizeof(buf), "id=%u kind=%s role=%s rloc16=0x%04x part=0x%08x pos=(%.1f,%.1f,%.1f)\n",
+            std::snprintf(buf, sizeof(buf), "id=%u kind=%s role=%s rloc16=0x%04x part=0x%08x pos=(%.1f,%.1f,%.1f)",
                           snap.mId, (snap.mKind == Core::NodeKind::kExternal) ? "ext" : "inproc", RoleName(snap.mRole),
                           static_cast<unsigned>(snap.mRloc16), snap.mPartitionId, snap.mPos.mX, snap.mPos.mY,
                           snap.mPos.mZ);
             aOut << buf;
+            if (!snap.mLabel.empty())
+            {
+                aOut << " label=" << snap.mLabel;
+            }
+            aOut << "\n";
         }
         aOut << "Done\n";
         return true;

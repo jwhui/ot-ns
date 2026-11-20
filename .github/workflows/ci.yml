@@ -140,10 +140,32 @@ jobs:
             OTNS_BIN="${{ github.workspace }}/build-release/otns" python3 "${script}"
           done
 
-      - name: Verify standalone ot-rfsim v3 library & CLI build
+      - name: Verify standalone ot-rfsim v3 library, FTD CLI, and RCP build
         run: |
           cmake -S ot-rfsim -B build-rfsim-standalone -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-rfsim-standalone
+
+      - name: Smoke-test real OpenThread POSIX host over ot-rcp-rfsim (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S openthread -B build-ot-posix -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOT_PLATFORM=posix \
+            -DOT_THREAD_VERSION=1.4 \
+            -DOT_FTD=ON \
+            -DOT_APP_CLI=ON \
+            -DOT_APP_NCP=OFF \
+            -DOT_APP_RCP=OFF \
+            -DOT_PLATFORM_NETIF=OFF \
+            -DOT_PLATFORM_UDP=OFF \
+            -DOT_PING_SENDER=ON \
+            -DOT_COMPILE_WARNING_AS_ERROR=OFF \
+            -DBUILD_TESTING=OFF
+          cmake --build build-ot-posix --target ot-cli
+          OTNS_BIN="${{ github.workspace }}/build-release/otns" \
+          OT_POSIX_CLI_BIN="${{ github.workspace }}/build-ot-posix/src/posix/ot-cli" \
+            python3 -W error::ResourceWarning -m unittest \
+            python/tests/test_otns_sdk.py -k test_real_posix_host_over_ot_rcp_rfsim -v
 
   sanitizers:
     name: ASan + UBSan (${{ matrix.compiler }})

@@ -28,8 +28,10 @@
 
 #include "server/rpc_handler.hpp"
 
+#include <algorithm>
 #include <cmath>
 
+#include "core/path_security.hpp"
 #include "core/topology.hpp"
 
 namespace otns {
@@ -92,6 +94,26 @@ bool ParsePreset(const std::string &aName, Rf::RadioModelPreset &aOut)
     return false;
 }
 
+bool ParseSpawnArgStyle(const std::string &aName, Nodes::SpawnArgStyle &aOut)
+{
+    if (aName == "otns")
+    {
+        aOut = Nodes::SpawnArgStyle::kOtns;
+        return true;
+    }
+    if (aName == "matter")
+    {
+        aOut = Nodes::SpawnArgStyle::kMatter;
+        return true;
+    }
+    if (aName == "raw")
+    {
+        aOut = Nodes::SpawnArgStyle::kRaw;
+        return true;
+    }
+    return false;
+}
+
 nlohmann::json ParamsToJson(const Rf::RadioModelParams &aParams)
 {
     nlohmann::json p = nlohmann::json::object();
@@ -121,13 +143,23 @@ RpcHandler::RpcHandler(Core::Simulation            &aSim,
                        WsServer                    &aServer,
                        VizPublisher                &aViz,
                        JsonlRecorder               &aRecorder,
-                       const std::filesystem::path &aOutputDir)
+                       const std::filesystem::path &aOutputDir,
+                       Nodes::RfSimServer          *aRfSimServer)
     : mSim(aSim)
     , mServer(aServer)
     , mViz(aViz)
     , mRecorder(aRecorder)
     , mOutputDir(aOutputDir)
+    , mRfSimServer(aRfSimServer)
 {
+}
+
+void RpcHandler::AddAllowedSpawnPath(const std::filesystem::path &aPath)
+{
+    if (!aPath.empty())
+    {
+        mAllowedSpawnPaths.push_back(aPath);
+    }
 }
 
 nlohmann::json RpcHandler::MakeResult(const nlohmann::json &aId, nlohmann::json aResult)
@@ -209,12 +241,17 @@ nlohmann::json RpcHandler::Dispatch(ClientId aClientId, const std::string &aMeth
     {
         nlohmann::json res = nlohmann::json::object();
 
-        res["engine"]     = "otns-v3";
-        res["version"]    = 1;
-        res["ts_us"]      = mSim.GetNowUs();
-        res["speed"]      = mSim.GetSpeed();
-        res["paused"]     = mPaused;
-        res["node_count"] = mSim.GetStats().mTotal;
+        res["engine"]        = "otns-v3";
+        res["version"]       = 1;
+        res["ts_us"]         = mSim.GetNowUs();
+        res["speed"]         = mSim.GetSpeed();
+        res["paused"]        = mPaused;
+        res["node_count"]    = mSim.GetStats().mTotal;
+        res["spawn_enabled"] = !mAllowedSpawnPaths.empty() && (mRfSimServer != nullptr) && mRfSimServer->IsListening();
+        if (mRfSimServer != nullptr && mRfSimServer->IsListening())
+        {
+            res["rfsim_endpoint"] = mRfSimServer->GetEndpoint();
+        }
         return res;
     }
 
@@ -342,11 +379,152 @@ nlohmann::json RpcHandler::Dispatch(ClientId aClientId, const std::string &aMeth
         {
             cfg.mAutoStart = aParams["auto_start"].get<bool>();
         }
+        if (aParams.contains("label") && aParams["label"].is_string())
+        {
+            cfg.mLabel = Core::SanitizeNodeLabel(aParams["label"].get<std::string>());
+        }
 
         Rf::NodeId id = mSim.AddNode(cfg);
 
         mViz.PublishDiffIfDue(mPaused, true);
         return nlohmann::json{{"node_id", id}};
+    }
+
+    if (aMethod == "node.spawn")
+    {
+        static constexpr size_t kMaxSpawnArgs      = 32;
+        static constexpr size_t kMaxSpawnArgBytes  = 4096;
+        static constexpr int    kMinSpawnTimeoutMs = 500;
+        static constexpr int    kMaxSpawnTimeoutMs = 30000;
+
+        if (mRfSimServer == nullptr || !mRfSimServer->IsListening())
+        {
+            return err("RFSIM_DISABLED", "Start otns with --rfsim-socket or --rfsim-tcp to spawn external nodes");
+        }
+        if (mAllowedSpawnPaths.empty())
+        {
+            return err("SPAWN_DISABLED",
+                       "External node spawning is disabled; start otns with --allow-spawn <dir-or-file>");
+        }
+        if (!aParams.contains("executable") || !aParams["executable"].is_string())
+        {
+            return err("INVALID_PARAMS", "Expected string 'executable'");
+        }
+
+        std::filesystem::path resolvedExe;
+        std::string           reqExe = aParams["executable"].get<std::string>();
+
+        if (!Core::ResolveAllowedExecutable(mAllowedSpawnPaths, reqExe, resolvedExe))
+        {
+            return err("FORBIDDEN_EXECUTABLE",
+                       "Executable must be a regular executable file inside an allowlisted --allow-spawn path");
+        }
+
+        Nodes::SpawnArgStyle argStyle = Nodes::SpawnArgStyle::kOtns;
+
+        if (aParams.contains("arg_style"))
+        {
+            if (!aParams["arg_style"].is_string() ||
+                !ParseSpawnArgStyle(aParams["arg_style"].get<std::string>(), argStyle))
+            {
+                return err("INVALID_PARAMS", "Unknown 'arg_style' (expected 'otns', 'matter', or 'raw')");
+            }
+        }
+
+        Core::NodeConfig cfg;
+
+        cfg.mAutoStart = (argStyle == Nodes::SpawnArgStyle::kOtns);
+        if (aParams.contains("type"))
+        {
+            if (!aParams["type"].is_string() || !ParseNodeType(aParams["type"].get<std::string>(), cfg.mType))
+            {
+                return err("INVALID_PARAMS", "Unknown node 'type'");
+            }
+        }
+        else if (aParams.contains("role"))
+        {
+            if (!aParams["role"].is_string() || !ParseNodeType(aParams["role"].get<std::string>(), cfg.mType))
+            {
+                return err("INVALID_PARAMS", "Unknown node 'role'");
+            }
+        }
+        if (aParams.contains("x") && aParams["x"].is_number())
+        {
+            cfg.mPos.mX = aParams["x"].get<double>();
+        }
+        if (aParams.contains("y") && aParams["y"].is_number())
+        {
+            cfg.mPos.mY = aParams["y"].get<double>();
+        }
+        if (aParams.contains("z") && aParams["z"].is_number())
+        {
+            cfg.mPos.mZ = aParams["z"].get<double>();
+        }
+        if (aParams.contains("radio_range") && aParams["radio_range"].is_number())
+        {
+            cfg.mRadioRange = aParams["radio_range"].get<double>();
+        }
+        if (aParams.contains("auto_start") && aParams["auto_start"].is_boolean())
+        {
+            cfg.mAutoStart = aParams["auto_start"].get<bool>();
+        }
+        if (aParams.contains("label") && aParams["label"].is_string())
+        {
+            cfg.mLabel = Core::SanitizeNodeLabel(aParams["label"].get<std::string>());
+        }
+
+        std::vector<std::string> extraArgs;
+
+        if (aParams.contains("args"))
+        {
+            if (!aParams["args"].is_array() || aParams["args"].size() > kMaxSpawnArgs)
+            {
+                return err("INVALID_PARAMS", "'args' must be an array of at most 32 strings");
+            }
+            for (const auto &v : aParams["args"])
+            {
+                if (!v.is_string())
+                {
+                    return err("INVALID_PARAMS", "Each entry in 'args' must be a string");
+                }
+                std::string s = v.get<std::string>();
+
+                if (s.size() > kMaxSpawnArgBytes || s.find('\0') != std::string::npos)
+                {
+                    return err("INVALID_PARAMS", "Invalid argument string in 'args'");
+                }
+                extraArgs.push_back(std::move(s));
+            }
+        }
+
+        int timeoutMs = 5000;
+
+        if (aParams.contains("timeout_ms") && aParams["timeout_ms"].is_number_unsigned())
+        {
+            timeoutMs = static_cast<int>(
+                std::clamp<uint64_t>(aParams["timeout_ms"].get<uint64_t>(), kMinSpawnTimeoutMs, kMaxSpawnTimeoutMs));
+        }
+
+        Rf::NodeId id = mRfSimServer->SpawnExternalNode(resolvedExe.string(), cfg, extraArgs, timeoutMs, argStyle);
+
+        if (id == Rf::kInvalidNodeId)
+        {
+            return err("SPAWN_FAILED", "Spawned process failed to complete ot-rfsim v3 handshake within timeout");
+        }
+
+        auto           snap = mSim.GetNodeSnapshot(id);
+        nlohmann::json res  = nlohmann::json::object();
+
+        res["node_id"]  = id;
+        res["kind"]     = "external";
+        res["endpoint"] = mRfSimServer->GetEndpoint();
+        if (snap.has_value() && !snap->mLabel.empty())
+        {
+            res["label"] = snap->mLabel;
+        }
+
+        mViz.PublishDiffIfDue(mPaused, true);
+        return res;
     }
 
     if (aMethod == "node.remove")

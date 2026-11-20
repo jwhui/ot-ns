@@ -51,9 +51,9 @@ Common `otns` daemon flags:
 --headless            Disable interactive stdin REPL
 ```
 
-### 3. Hybrid External `ot-rfsim` v3 Nodes (Standalone or Library Mode)
+### 3. Hybrid External `ot-rfsim` v3 Nodes (Standalone FTD, Real OTBR/RCP & Library Mode)
 
-Launch the daemon with an `ot-rfsim` v3 listener and attach external processes:
+Launch the daemon with an `ot-rfsim` v3 listener and attach external standalone FTD processes:
 
 ```bash
 ./build-release/otns --port 8999 --rfsim-socket /tmp/otns-rfsim.sock
@@ -61,12 +61,32 @@ Launch the daemon with an `ot-rfsim` v3 listener and attach external processes:
 ./build-release/ot-rfsim/ot-cli-ftd-rfsim --socket /tmp/otns-rfsim.sock --node-id 2
 ```
 
-External projects (such as Matter or OTBR) can build `ot-rfsim/` standalone and link `openthread-rfsim-v3` directly against single- or multi-instance OpenThread using the C API in `ot-rfsim/include/ot_rfsim_v3.h`:
+Attach a **real OpenThread POSIX host (`ot-cli`) or `otbr-agent`** over Spinel/HDLC via `ot-rcp-rfsim` (with `otns` running at real-time `--speed 1.0`):
 
 ```bash
-cmake -S ot-rfsim -B build-rfsim -G Ninja -DCMAKE_BUILD_TYPE=Release
+./build-release/otns --port 8999 --speed 1.0 --rfsim-socket /tmp/otns-rfsim.sock
+# In another terminal (otbr-agent or OpenThread POSIX ot-cli):
+otbr-agent -I wpan0 -B eth0 \
+  "spinel+hdlc+forkpty://$(pwd)/build-release/ot-rfsim/ot-rcp-rfsim?forkpty-arg=--socket&forkpty-arg=/tmp/otns-rfsim.sock&forkpty-arg=--node-id&forkpty-arg=2"
+```
+
+External projects (such as Matter or OTBR) can build `ot-rfsim/` standalone and link `openthread-rfsim-v3` (FTD/MTD with optional `otPlatTrel*` and `otPlatInfraIf*` virtual AIL support) or `openthread-rfsim-v3-rcp` (RCP) using the C API in `ot-rfsim/include/ot_rfsim_v3.h`:
+
+```bash
+cmake -S ot-rfsim -B build-rfsim -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DOT_RFSIM_TREL=ON -DOT_RFSIM_BORDER_ROUTING=ON
 cmake --build build-rfsim
 ```
+
+To orchestrate externally built Matter apps or custom `ot-rfsim` v3 binaries directly from the Python SDK (`cli.spawn_node(...)`), JSON-RPC (`node.spawn`), or REPL (`spawn`), opt in with an explicit executable allowlist:
+
+```bash
+./build-release/otns --port 8999 \
+  --rfsim-socket /tmp/otns-rfsim.sock \
+  --allow-spawn ./build-release/ot-rfsim
+```
+
+`otSysInit()` accepts `--endpoint`/`--socket`/`--node-id`/`--label`, Matter's `--thread-args=<id> --thread-args=<socket>` convention, and `OTNS_RFSIM_ENDPOINT` environment fallback, and integrates with POSIX `select()` loops via `otSysUpdateEvents()`/`otSysProcessEvents()`.
 
 ### 4. Python 3 SDK & Examples
 

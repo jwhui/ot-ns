@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "cli/repl.hpp"
 #include "core/simulation.hpp"
@@ -63,6 +64,7 @@ void PrintUsage(const char *aProg)
               << "  --rpc-socket <path>   Optional Unix domain socket for JSON-RPC\n"
               << "  --rfsim-socket <path> Optional Unix socket for external ot-rfsim v3 nodes\n"
               << "  --rfsim-tcp <port>    Optional TCP loopback port for external ot-rfsim v3 nodes\n"
+              << "  --allow-spawn <path>  Allowlist an executable file or directory for node.spawn (repeatable)\n"
               << "  --output-dir <dir>    Contained directory for PCAP/KPI/topology/replay outputs\n"
               << "  --web-dir <dir>       Serve web UI assets from directory instead of embedded bundle\n"
               << "  --topology <file>     Load JSON topology file at startup\n"
@@ -111,17 +113,18 @@ int main(int aArgc, char *aArgv[])
     std::signal(SIGINT, &HandleSignal);
     std::signal(SIGTERM, &HandleSignal);
 
-    uint16_t                     httpPort = 8999;
-    std::string                  bindAddr = "127.0.0.1";
-    std::string                  rpcSocket;
-    std::string                  rfsimSocket;
-    int                          rfsimTcpPort = -1;
-    std::filesystem::path        outputDir    = std::filesystem::current_path() / "otns_out";
-    std::filesystem::path        webDir;
-    std::string                  topologyPath;
-    std::string                  replayPath;
-    bool                         headless = false;
-    otns::Core::SimulationConfig simCfg;
+    uint16_t                           httpPort = 8999;
+    std::string                        bindAddr = "127.0.0.1";
+    std::string                        rpcSocket;
+    std::string                        rfsimSocket;
+    int                                rfsimTcpPort = -1;
+    std::vector<std::filesystem::path> allowSpawnPaths;
+    std::filesystem::path              outputDir = std::filesystem::current_path() / "otns_out";
+    std::filesystem::path              webDir;
+    std::string                        topologyPath;
+    std::string                        replayPath;
+    bool                               headless = false;
+    otns::Core::SimulationConfig       simCfg;
 
     simCfg.mSpeed = 1.0;
 
@@ -166,6 +169,10 @@ int main(int aArgc, char *aArgv[])
         else if (arg == "--rfsim-tcp")
         {
             rfsimTcpPort = static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
+        }
+        else if (arg == "--allow-spawn")
+        {
+            allowSpawnPaths.emplace_back(val);
         }
         else if (arg == "--output-dir")
         {
@@ -303,8 +310,13 @@ int main(int aArgc, char *aArgv[])
     }
 
     otns::Server::VizPublisher viz(sim, wsServer, &recorder);
-    otns::Server::RpcHandler   rpc(sim, wsServer, viz, recorder, outputDir);
+    otns::Server::RpcHandler   rpc(sim, wsServer, viz, recorder, outputDir, &rfsimServer);
     otns::Cli::Repl            repl(sim, viz, rpc, recorder, outputDir);
+
+    for (const auto &spawnPath : allowSpawnPaths)
+    {
+        rpc.AddAllowedSpawnPath(spawnPath);
+    }
 
     sim.SetPacketObserver([&viz](const otns::Core::PacketObservation &aObs) { viz.OnPacket(aObs); });
     wsServer.SetOnConnect([&viz, &rpc](otns::Server::ClientId aId) { viz.OnClientConnect(aId, rpc.IsPaused()); });
@@ -365,6 +377,7 @@ int main(int aArgc, char *aArgv[])
             {
                 viz.PublishDiffIfDue(rpc.IsPaused(), true);
             }
+            sim.PollExternalNodes();
         }
 
         if (stdinReady && replFd >= 0)

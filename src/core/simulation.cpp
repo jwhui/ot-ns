@@ -196,7 +196,7 @@ bool Simulation::RemoveNode(Rf::NodeId aId)
         return false;
     }
 
-    mNetFabric.RemoveNode(aId);
+    mNetFabric.RemoveNode(aId, MakeTrelPeerCallback());
     mRadioModel.RemoveNode(aId);
     mNodeConfigs.erase(aId);
     mNodes.erase(it);
@@ -324,11 +324,26 @@ void Simulation::DrainTasklets(void)
     }
 }
 
+void Simulation::PollExternalNodes(void)
+{
+    ScopedCurrentSim guard(this);
+
+    for (auto &pair : mNodes)
+    {
+        if (pair.second->IsEnabled())
+        {
+            pair.second->PollExternal();
+        }
+    }
+    DrainTasklets();
+}
+
 void Simulation::AdvanceUs(uint64_t aDurationUs)
 {
     ScopedCurrentSim guard(this);
     uint64_t         targetUs = mScheduler.GetNowUs() + aDurationUs;
 
+    PollExternalNodes();
     DrainTasklets();
 
     while (true)
@@ -504,6 +519,34 @@ bool Simulation::LoadTopology(const TopologySpec &aSpec)
     return true;
 }
 
+NetFabric::TrelPeerCallback Simulation::MakeTrelPeerCallback(void)
+{
+    return [this](Rf::NodeId aTargetId, const TrelPeerRecord &aPeer, bool aRemoved) {
+        mScheduler.ScheduleAfter(0, [this, aTargetId, aPeer, aRemoved](void) {
+            auto it = mNodes.find(aTargetId);
+
+            if (it != mNodes.end() && it->second->IsEnabled())
+            {
+                it->second->OnTrelPeerChange(aPeer, aRemoved);
+            }
+        });
+    };
+}
+
+void Simulation::RegisterTrelPeer(Rf::NodeId aNodeId, uint16_t aUdpPort, const std::vector<uint8_t> &aTxtData)
+{
+    mNetFabric.RegisterTrelPeer(aNodeId, aUdpPort, aTxtData, MakeTrelPeerCallback());
+}
+
+void Simulation::UnregisterTrelPeer(Rf::NodeId aNodeId)
+{
+    mNetFabric.UnregisterTrelPeer(aNodeId, MakeTrelPeerCallback());
+}
+
+void Simulation::JoinInfraIf(Rf::NodeId aNodeId) { mNetFabric.JoinInfraIf(aNodeId); }
+
+void Simulation::LeaveInfraIf(Rf::NodeId aNodeId) { mNetFabric.LeaveInfraIf(aNodeId); }
+
 void Simulation::SendTrelPacket(const NetPacket &aPacket)
 {
     auto target = mNetFabric.ResolveTrelTarget(aPacket.mDstIp6, aPacket.mDstPort);
@@ -514,8 +557,14 @@ void Simulation::SendTrelPacket(const NetPacket &aPacket)
     }
 
     Rf::NodeId dstId = *target;
+    NetPacket  pkt   = aPacket;
 
-    mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = aPacket](void) {
+    if (pkt.mSrcIp6 == Ip6Addr{})
+    {
+        pkt.mSrcIp6 = NetFabric::MakeNodeBackboneIp6(pkt.mSrcNodeId);
+    }
+
+    mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = std::move(pkt)](void) {
         auto it = mNodes.find(dstId);
 
         if (it != mNodes.end() && it->second->IsEnabled())
@@ -528,10 +577,16 @@ void Simulation::SendTrelPacket(const NetPacket &aPacket)
 void Simulation::SendInfraIfPacket(const NetPacket &aPacket)
 {
     std::vector<Rf::NodeId> targets = mNetFabric.ResolveInfraIfTargets(aPacket.mSrcNodeId, aPacket.mDstIp6);
+    NetPacket               basePkt = aPacket;
+
+    if (basePkt.mSrcIp6 == Ip6Addr{})
+    {
+        basePkt.mSrcIp6 = NetFabric::MakeNodeLinkLocalIp6(basePkt.mSrcNodeId);
+    }
 
     for (Rf::NodeId dstId : targets)
     {
-        mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = aPacket](void) {
+        mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = basePkt](void) {
             auto it = mNodes.find(dstId);
 
             if (it != mNodes.end() && it->second->IsEnabled())
@@ -546,10 +601,16 @@ void Simulation::SendHostUdpPacket(const NetPacket &aPacket)
 {
     std::vector<Rf::NodeId> targets =
         mNetFabric.ResolveHostUdpTargets(aPacket.mSrcNodeId, aPacket.mDstIp6, aPacket.mDstPort);
+    NetPacket basePkt = aPacket;
+
+    if (basePkt.mSrcIp6 == Ip6Addr{})
+    {
+        basePkt.mSrcIp6 = NetFabric::MakeNodeBackboneIp6(basePkt.mSrcNodeId);
+    }
 
     for (Rf::NodeId dstId : targets)
     {
-        mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = aPacket](void) {
+        mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = basePkt](void) {
             auto it = mNodes.find(dstId);
 
             if (it != mNodes.end() && it->second->IsEnabled())

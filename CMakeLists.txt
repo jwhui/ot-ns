@@ -112,7 +112,7 @@ set(OT_APP_RCP OFF CACHE BOOL "" FORCE)
 set(OT_BUILD_EXECUTABLES OFF CACHE BOOL "" FORCE)
 set(OT_FTD ON CACHE BOOL "" FORCE)
 set(OT_MTD OFF CACHE BOOL "" FORCE)
-set(OT_RCP OFF CACHE BOOL "" FORCE)
+set(OT_RCP ON CACHE BOOL "" FORCE)
 set(OT_15_4 ON CACHE BOOL "" FORCE)
 set(OT_PING_SENDER ON CACHE BOOL "" FORCE)
 set(OT_BUILTIN_MBEDTLS ON CACHE BOOL "" FORCE)
@@ -288,6 +288,12 @@ if(OTNS_BUILD_TESTS)
         tests/test_server_rpc.cpp
     )
     target_link_libraries(test_server_rpc PRIVATE otns_server otns_doctest otns_build_options)
+    if(OTNS_BUILD_RFSIM)
+        target_compile_definitions(test_server_rpc PRIVATE
+            OTNS_RFSIM_CLI_BIN="$<TARGET_FILE:ot-cli-ftd-rfsim>"
+        )
+        add_dependencies(test_server_rpc ot-cli-ftd-rfsim)
+    endif()
     add_test(NAME test_server_rpc COMMAND test_server_rpc)
 
     if(OTNS_BUILD_RFSIM)

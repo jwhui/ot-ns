@@ -154,9 +154,10 @@ private:
     void       ConfigureInitialDataset(const Core::NodeConfig &aConfig);
 
     Core::Simulation     &mSim;
-    Rf::NodeId            mId                 = Rf::kInvalidNodeId;
-    Rf::Position3D        mPos                = {};
-    double                mRadioRange         = Rf::kDefaultRadioRange;
+    Rf::NodeId            mId         = Rf::kInvalidNodeId;
+    Rf::Position3D        mPos        = {};
+    double                mRadioRange = Rf::kDefaultRadioRange;
+    std::string           mLabel;
     bool                  mEnabled            = true;
     bool                  mHasPendingTasklets = false;
     std::shared_ptr<bool> mAliveFlag;

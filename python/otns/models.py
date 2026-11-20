@@ -47,6 +47,7 @@ class NodeInfo:
     radio_range: float
     failed: bool
     kind: str
+    label: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NodeInfo:
@@ -63,6 +64,7 @@ class NodeInfo:
             radio_range=float(data.get("radio_range", 160.0)),
             failed=bool(data.get("failed", False)),
             kind=str(data.get("kind", "inproc")),
+            label=str(data.get("label", "")),
         )
 
 
@@ -97,6 +99,8 @@ class SimInfo:
     speed: float
     paused: bool
     node_count: int
+    spawn_enabled: bool = False
+    rfsim_endpoint: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SimInfo:
@@ -107,4 +111,6 @@ class SimInfo:
             speed=float(data.get("speed", 0.0)),
             paused=bool(data.get("paused", True)),
             node_count=int(data.get("node_count", 0)),
+            spawn_enabled=bool(data.get("spawn_enabled", False)),
+            rfsim_endpoint=str(data.get("rfsim_endpoint", "")),
         )

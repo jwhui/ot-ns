@@ -64,10 +64,24 @@ enum class DeviceRole : uint8_t
 
 struct NodeConfig
 {
+    NodeConfig(NodeType       aType       = NodeType::kRouter,
+               Rf::Position3D aPos        = {},
+               double         aRadioRange = Rf::kDefaultRadioRange,
+               bool           aAutoStart  = true,
+               std::string    aLabel      = {})
+        : mType(aType)
+        , mPos(aPos)
+        , mRadioRange(aRadioRange)
+        , mAutoStart(aAutoStart)
+        , mLabel(std::move(aLabel))
+    {
+    }
+
     NodeType       mType       = NodeType::kRouter;
     Rf::Position3D mPos        = {};
     double         mRadioRange = Rf::kDefaultRadioRange;
     bool           mAutoStart  = true;
+    std::string    mLabel;
 };
 
 struct NeighborLinkSnapshot
@@ -89,6 +103,7 @@ struct NodeSnapshot
     uint16_t                          mParentRloc16 = 0xFFFE;
     uint32_t                          mPartitionId  = 0;
     std::string                       mExtAddr;
+    std::string                       mLabel;
     bool                              mEnabled = true;
     std::vector<NeighborLinkSnapshot> mNeighbors;
 };
@@ -121,6 +136,7 @@ public:
 
     virtual bool HasPendingTasklets(void) const = 0;
     virtual void ProcessTasklets(void)          = 0;
+    virtual void PollExternal(void) {}
 
     virtual std::string ExecuteCli(const std::string &aCommand) = 0;
     virtual std::string TakeCliOutput(void)                     = 0;
@@ -131,6 +147,11 @@ public:
 
     // Optional virtual backbone delivery hooks (TREL / Infra-If / Host UDP).
     virtual void OnTrelPacket(const NetPacket &aPacket) { (void)aPacket; }
+    virtual void OnTrelPeerChange(const TrelPeerRecord &aPeer, bool aRemoved)
+    {
+        (void)aPeer;
+        (void)aRemoved;
+    }
     virtual void OnInfraIfPacket(const NetPacket &aPacket) { (void)aPacket; }
     virtual void OnHostUdpPacket(const NetPacket &aPacket) { (void)aPacket; }
 };

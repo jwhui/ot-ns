@@ -53,8 +53,8 @@ RUN cmake -S . -B /build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DOTNS_BUILD_WEB=ON \
         -DOTNS_BUILD_TESTS=OFF \
-    && cmake --build /build --target otns ot-cli-ftd-rfsim \
-    && strip /build/otns /build/ot-rfsim/ot-cli-ftd-rfsim
+    && cmake --build /build --target otns ot-cli-ftd-rfsim ot-rcp-rfsim \
+    && strip /build/otns /build/ot-rfsim/ot-cli-ftd-rfsim /build/ot-rfsim/ot-rcp-rfsim
 
 FROM debian:bookworm-slim AS runtime
 
@@ -69,11 +69,13 @@ RUN apt-get update \
 
 COPY --from=builder /build/otns /usr/local/bin/otns
 COPY --from=builder /build/ot-rfsim/ot-cli-ftd-rfsim /usr/local/bin/ot-cli-ftd-rfsim
+COPY --from=builder /build/ot-rfsim/ot-rcp-rfsim /usr/local/bin/ot-rcp-rfsim
 COPY --from=builder /src/python /opt/otns/python
 
 ENV PYTHONPATH=/opt/otns/python \
     OTNS_BIN=/usr/local/bin/otns \
-    OTNS_RFSIM_BIN=/usr/local/bin/ot-cli-ftd-rfsim
+    OTNS_RFSIM_BIN=/usr/local/bin/ot-cli-ftd-rfsim \
+    OTNS_RCP_BIN=/usr/local/bin/ot-rcp-rfsim
 
 USER otns
 WORKDIR /data

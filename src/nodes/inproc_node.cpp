@@ -177,6 +177,7 @@ InProcNode::InProcNode(Core::Simulation &aSim, Rf::NodeId aId, const Core::NodeC
     , mId(aId)
     , mPos(aConfig.mPos)
     , mRadioRange(aConfig.mRadioRange)
+    , mLabel(aConfig.mLabel)
     , mAliveFlag(std::make_shared<bool>(true))
     , mChannel(aSim.GetConfig().mChannel)
 {
@@ -377,6 +378,7 @@ Core::NodeSnapshot InProcNode::GetSnapshot(void) const
     snap.mKind       = Core::NodeKind::kInProc;
     snap.mPos        = mPos;
     snap.mRadioRange = mRadioRange;
+    snap.mLabel      = mLabel;
     snap.mEnabled    = mEnabled;
 
     if (mOtInstance != nullptr)

@@ -47,6 +47,20 @@ extern "C" {
 
 typedef void (*otRfSimCliInputCallback)(const char *aLine, void *aContext);
 
+typedef void (*otRfSimPacketCallback)(const uint8_t  aSrcIp6[16],
+                                      uint16_t       aSrcPort,
+                                      const uint8_t  aDstIp6[16],
+                                      uint16_t       aDstPort,
+                                      const uint8_t *aPayload,
+                                      uint16_t       aLength,
+                                      void          *aContext);
+
+/**
+ * Sets an optional application label sent during the v3 Hello handshake
+ * (e.g., "matter", "rcp", "otbr"). Must be called before otSysInit() / otRfSimConnect().
+ */
+void otRfSimSetAppName(const char *aName);
+
 /**
  * Configures the simulator socket endpoint before otSysInit() or otRfSimConnect().
  *
@@ -101,6 +115,51 @@ void otRfSimSendCliOutput(const char *aText, size_t aLength);
  * and sending the initial StepDone frame.
  */
 bool otRfSimCompleteStartup(otInstance *aInstance);
+
+/**
+ * Joins the simulated Adjacent Infrastructure Link (AIL / Infra-If) and notifies
+ * OpenThread Border Routing if enabled.
+ */
+bool otRfSimInitInfraIf(otInstance *aInstance, uint32_t aInfraIfIndex);
+
+/**
+ * Leaves the simulated Adjacent Infrastructure Link (AIL / Infra-If).
+ */
+void otRfSimDeinitInfraIf(otInstance *aInstance);
+
+/**
+ * Computes this node's deterministic simulated AIL link-local IPv6 address (fe80::<nodeId>).
+ */
+bool otRfSimGetInfraIfLinkLocalAddress(uint8_t aAddr[16]);
+
+/**
+ * Computes this node's deterministic simulated virtual backbone IPv6 address (fd00:0:0:cafe::<nodeId>).
+ */
+bool otRfSimGetBackboneAddress(uint8_t aAddr[16]);
+
+/**
+ * Registers optional callbacks for observing or handling virtual backbone packets
+ * (TREL, Infra-If AIL, and Host UDP/IPv6).
+ */
+void otRfSimSetTrelPacketHandler(otRfSimPacketCallback aCallback, void *aContext);
+void otRfSimSetInfraIfPacketHandler(otRfSimPacketCallback aCallback, void *aContext);
+void otRfSimSetHostUdpPacketHandler(otRfSimPacketCallback aCallback, void *aContext);
+
+/**
+ * Direct virtual backbone helpers for library-mode hosts (e.g., Matter controllers/devices)
+ * communicating over the simulator's virtual IPv6/UDP fabric without kernel TUN/sockets.
+ */
+bool otRfSimRegisterTrelService(uint16_t aUdpPort, const uint8_t *aTxtData, uint16_t aTxtLength);
+void otRfSimUnregisterTrelService(void);
+bool otRfSimSendTrelPacket(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength);
+bool otRfSimSendInfraIfPacket(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength);
+bool otRfSimBindHostUdp(uint16_t aPort);
+bool otRfSimUnbindHostUdp(uint16_t aPort);
+bool otRfSimSendHostUdp(uint16_t       aSrcPort,
+                        const uint8_t  aDstIp6[16],
+                        uint16_t       aDstPort,
+                        const uint8_t *aPayload,
+                        uint16_t       aLength);
 
 #ifdef __cplusplus
 } // extern "C"

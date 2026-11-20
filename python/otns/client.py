@@ -294,6 +294,7 @@ class OtnsClient:
         z: float = 0.0,
         radio_range: float | None = None,
         auto_start: bool = True,
+        label: str | None = None,
     ) -> int:
         params: dict[str, Any] = {
             "type": node_type,
@@ -304,7 +305,43 @@ class OtnsClient:
         }
         if radio_range is not None:
             params["radio_range"] = float(radio_range)
+        if label is not None:
+            params["label"] = str(label)
         res = self.call("node.add", params)
+        return int(res["node_id"])
+
+    def spawn_node(
+        self,
+        executable: str | Path,
+        node_type: str = "router",
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float = 0.0,
+        radio_range: float | None = None,
+        auto_start: bool | None = None,
+        args: list[str] | None = None,
+        arg_style: str = "otns",
+        label: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> int:
+        params: dict[str, Any] = {
+            "executable": str(executable),
+            "type": node_type,
+            "x": float(x),
+            "y": float(y),
+            "z": float(z),
+            "arg_style": arg_style,
+            "timeout_ms": int(timeout_ms),
+        }
+        if radio_range is not None:
+            params["radio_range"] = float(radio_range)
+        if auto_start is not None:
+            params["auto_start"] = bool(auto_start)
+        if args is not None:
+            params["args"] = [str(a) for a in args]
+        if label is not None:
+            params["label"] = str(label)
+        res = self.call("node.spawn", params)
         return int(res["node_id"])
 
     def add_router(self, x: float = 0.0, y: float = 0.0, z: float = 0.0, **kwargs: Any) -> int:
@@ -400,13 +437,15 @@ class OtnsSession:
         output_dir: str | Path | None = None,
         use_unix_rpc: bool = False,
         enable_rfsim: bool = False,
+        allow_spawn: list[str | Path] | None = None,
     ) -> None:
         self._otns_bin = str(otns_bin)
         self._seed = seed
         self._rf_model = rf_model
         self._speed = speed
         self._use_unix_rpc = use_unix_rpc
-        self._enable_rfsim = enable_rfsim
+        self._enable_rfsim = enable_rfsim or bool(allow_spawn)
+        self._allow_spawn = [str(p) for p in allow_spawn] if allow_spawn else []
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
         if output_dir is None:
             self._temp_dir = tempfile.TemporaryDirectory(prefix="otns_v3_py_")
@@ -443,6 +482,8 @@ class OtnsSession:
         if self._enable_rfsim:
             self.rfsim_socket_path = self.output_dir / "rfsim.sock"
             cmd.extend(["--rfsim-socket", str(self.rfsim_socket_path)])
+        for allowed in self._allow_spawn:
+            cmd.extend(["--allow-spawn", allowed])
 
         self._proc = subprocess.Popen(
             cmd,

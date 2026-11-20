@@ -28,6 +28,9 @@
 
 #include "core/path_security.hpp"
 
+#include <unistd.h>
+
+#include <cctype>
 #include <system_error>
 #include <vector>
 
@@ -158,6 +161,100 @@ bool ResolveContainedPath(const std::filesystem::path &aBaseDir,
     aOutPath = std::move(resolved);
 
     return true;
+}
+
+bool ResolveAllowedExecutable(const std::vector<std::filesystem::path> &aAllowedPaths,
+                              const std::string                        &aRequestedPath,
+                              std::filesystem::path                    &aOutPath)
+{
+    std::error_code ec;
+
+    aOutPath.clear();
+
+    if (aAllowedPaths.empty() || aRequestedPath.empty())
+    {
+        return false;
+    }
+
+    if (aRequestedPath.find('\0') != std::string::npos)
+    {
+        return false;
+    }
+
+    std::filesystem::path reqPath(aRequestedPath);
+
+    for (const auto &part : reqPath)
+    {
+        if (part == "..")
+        {
+            return false;
+        }
+    }
+
+    std::filesystem::path canonTarget = std::filesystem::canonical(reqPath, ec);
+
+    if (ec || !std::filesystem::is_regular_file(canonTarget, ec) || ec)
+    {
+        return false;
+    }
+
+    if (::access(canonTarget.c_str(), X_OK) != 0)
+    {
+        return false;
+    }
+
+    for (const auto &allowed : aAllowedPaths)
+    {
+        std::error_code       rootEc;
+        std::filesystem::path canonRoot = std::filesystem::canonical(allowed, rootEc);
+
+        if (rootEc)
+        {
+            continue;
+        }
+
+        if (std::filesystem::is_regular_file(canonRoot, rootEc) && !rootEc)
+        {
+            if (canonTarget == canonRoot)
+            {
+                aOutPath = std::move(canonTarget);
+                return true;
+            }
+        }
+        else if (std::filesystem::is_directory(canonRoot, rootEc) && !rootEc)
+        {
+            if (IsWithinBase(canonRoot, canonTarget))
+            {
+                aOutPath = std::move(canonTarget);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+std::string SanitizeNodeLabel(const std::string &aRaw)
+{
+    static constexpr size_t kMaxLabelLen = 32;
+    std::string             out;
+
+    out.reserve(std::min(aRaw.size(), kMaxLabelLen));
+    for (char ch : aRaw)
+    {
+        unsigned char uch = static_cast<unsigned char>(ch);
+
+        if (std::isalnum(uch) != 0 || ch == '_' || ch == '-' || ch == '.' || ch == ':' || ch == '/')
+        {
+            out.push_back(ch);
+            if (out.size() >= kMaxLabelLen)
+            {
+                break;
+            }
+        }
+    }
+
+    return out;
 }
 
 } // namespace Core

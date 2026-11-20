@@ -29,20 +29,26 @@
 #include "rfsim_client.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <openthread-core-config.h>
 #include <openthread-select.h>
 #include <openthread-system.h>
 #include <openthread/config.h>
+#if !OPENTHREAD_RADIO && (OPENTHREAD_FTD || OPENTHREAD_MTD)
+#include <openthread/ip6.h>
 #include <openthread/link.h>
-#include <openthread/tasklet.h>
+#include <openthread/message.h>
 #include <openthread/thread.h>
+#endif
+#include <openthread/tasklet.h>
 #include <openthread/platform/alarm-micro.h>
 #include <openthread/platform/alarm-milli.h>
 #include <openthread/platform/entropy.h>
@@ -52,8 +58,11 @@
 #include <openthread/platform/settings.h>
 #include <openthread/platform/time.h>
 
+#include "utils/uart.h"
+
 #include <algorithm>
 #include <cerrno>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -65,6 +74,62 @@ namespace RfSim {
 namespace {
 
 static constexpr size_t kMaxRxBufferBytes = 256u * 1024u;
+
+std::array<uint8_t, 16> MakeBackboneIp6(uint32_t aNodeId)
+{
+    std::array<uint8_t, 16> addr{};
+
+    addr[0]  = 0xFD;
+    addr[1]  = 0x00;
+    addr[6]  = 0xCA;
+    addr[7]  = 0xFE;
+    addr[12] = static_cast<uint8_t>((aNodeId >> 24u) & 0xFFu);
+    addr[13] = static_cast<uint8_t>((aNodeId >> 16u) & 0xFFu);
+    addr[14] = static_cast<uint8_t>((aNodeId >> 8u) & 0xFFu);
+    addr[15] = static_cast<uint8_t>(aNodeId & 0xFFu);
+
+    return addr;
+}
+
+std::array<uint8_t, 16> MakeLinkLocalIp6(uint32_t aNodeId)
+{
+    std::array<uint8_t, 16> addr{};
+
+    addr[0]  = 0xFE;
+    addr[1]  = 0x80;
+    addr[12] = static_cast<uint8_t>((aNodeId >> 24u) & 0xFFu);
+    addr[13] = static_cast<uint8_t>((aNodeId >> 16u) & 0xFFu);
+    addr[14] = static_cast<uint8_t>((aNodeId >> 8u) & 0xFFu);
+    addr[15] = static_cast<uint8_t>(aNodeId & 0xFFu);
+
+    return addr;
+}
+
+bool IsEndpointToken(const std::string &aToken)
+{
+    return aToken.rfind("unix://", 0) == 0 || aToken.rfind("tcp://", 0) == 0 || (!aToken.empty() && aToken[0] == '/') ||
+           aToken.find(".sock") != std::string::npos;
+}
+
+bool ParseUnsignedToken(const std::string &aToken, uint64_t &aOut)
+{
+    if (aToken.empty())
+    {
+        return false;
+    }
+
+    char              *endPtr = nullptr;
+    unsigned long long val    = std::strtoull(aToken.c_str(), &endPtr, 0);
+
+    if (endPtr == aToken.c_str() || *endPtr != '\0')
+    {
+        return false;
+    }
+
+    aOut = static_cast<uint64_t>(val);
+
+    return true;
+}
 
 uint64_t SplitMix64(uint64_t &aState)
 {
@@ -120,6 +185,7 @@ uint8_t ToWireRadioState(otRadioState aState)
     }
 }
 
+#if !OPENTHREAD_RADIO && (OPENTHREAD_FTD || OPENTHREAD_MTD)
 uint8_t ToWireRole(otDeviceRole aRole)
 {
     switch (aRole)
@@ -136,6 +202,7 @@ uint8_t ToWireRole(otDeviceRole aRole)
         return 0;
     }
 }
+#endif
 
 bool SendAllFd(int aFd, const uint8_t *aData, size_t aLength)
 {
@@ -279,6 +346,14 @@ Client::Client(void)
     mTxFrame.mPsdu = mTxPsdu.data();
 }
 
+void Client::SetAppName(const std::string &aName)
+{
+    if (!aName.empty())
+    {
+        mAppName = aName.substr(0, 32);
+    }
+}
+
 void Client::Configure(const std::string &aEndpoint, uint32_t aNodeId, uint64_t aSeed)
 {
     mEndpoint  = aEndpoint;
@@ -289,8 +364,13 @@ void Client::Configure(const std::string &aEndpoint, uint32_t aNodeId, uint64_t 
 bool Client::Connect(void)
 {
     Disconnect();
-    mDisconnected    = false;
-    mHasPushedStatus = false;
+    mDisconnected     = false;
+    mHasPushedStatus  = false;
+    mTrelEnabled      = false;
+    mTrelPort         = 0;
+    mTrelCounters     = {};
+    mInfraIfEnabled   = false;
+    mDhcp6PdListening = false;
     mLastSentAlarmUs.reset();
     mAlarmMilliUs.reset();
     mAlarmMicroUs.reset();
@@ -310,7 +390,7 @@ bool Client::Connect(void)
     hello.AddBytes(Protocol::TlvType::kMagic, Protocol::kProtocolMagic.data(), Protocol::kProtocolMagic.size());
     hello.AddVersion(Protocol::kProtocolMajor, Protocol::kProtocolMinor);
     hello.AddU32(Protocol::TlvType::kNodeId, mNodeId);
-    hello.AddText(Protocol::TlvType::kText, "ot-rfsim-v3");
+    hello.AddText(Protocol::TlvType::kText, mAppName);
 
     if (!SendFrame(hello))
     {
@@ -486,6 +566,181 @@ bool Client::CompleteStartup(otInstance *aInstance)
     return !mDisconnected;
 }
 
+void Client::ResetForPseudoReset(void)
+{
+    mAlarmMilliUs.reset();
+    mAlarmMicroUs.reset();
+    mLastSentAlarmUs.reset();
+    mRadioState      = OT_RADIO_STATE_DISABLED;
+    mPanId           = 0xFFFF;
+    mPromiscuous     = false;
+    mSrcMatchEnabled = false;
+    mSrcMatchShort.clear();
+    mSrcMatchExt.clear();
+    std::memset(&mRadioCtx, 0, sizeof(mRadioCtx));
+    mRadioCtx.mShortAddress          = OT_RADIO_INVALID_SHORT_ADDR;
+    mRadioCtx.mAlternateShortAddress = OT_RADIO_INVALID_SHORT_ADDR;
+    mUartTxBuf                       = nullptr;
+    mUartTxLen                       = 0;
+    mHasPushedStatus                 = false;
+    TrelDisable();
+    InfraIfDeinit(nullptr);
+    SendRadioState();
+    SyncAlarmToSim();
+}
+
+otError Client::UartEnable(void)
+{
+    if (mUartInFd < 0)
+    {
+        mUartInFd  = ::dup(STDIN_FILENO);
+        mUartOutFd = ::dup(STDOUT_FILENO);
+        if (mUartInFd < 0 || mUartOutFd < 0)
+        {
+            return OT_ERROR_FAILED;
+        }
+
+        // Redirect stdout to stderr so incidental logs never corrupt Spinel HDLC frames.
+        (void)::dup2(STDERR_FILENO, STDOUT_FILENO);
+        std::signal(SIGPIPE, SIG_IGN);
+
+        auto configureRawTty = [](int aFd) {
+            if (::isatty(aFd) != 0)
+            {
+                struct termios tios;
+
+                if (::tcgetattr(aFd, &tios) == 0)
+                {
+                    ::cfmakeraw(&tios);
+                    tios.c_oflag = 0;
+                    tios.c_cflag |= HUPCL | CREAD | CLOCAL;
+                    (void)::tcsetattr(aFd, TCSANOW, &tios);
+                }
+            }
+        };
+
+        configureRawTty(mUartInFd);
+        configureRawTty(mUartOutFd);
+
+        int inFlags = ::fcntl(mUartInFd, F_GETFL, 0);
+
+        if (inFlags >= 0)
+        {
+            (void)::fcntl(mUartInFd, F_SETFL, inFlags | O_NONBLOCK);
+        }
+
+        int outFlags = ::fcntl(mUartOutFd, F_GETFL, 0);
+
+        if (outFlags >= 0)
+        {
+            (void)::fcntl(mUartOutFd, F_SETFL, outFlags | O_NONBLOCK);
+        }
+    }
+
+    mUartEnabled = true;
+    mUartTxBuf   = nullptr;
+    mUartTxLen   = 0;
+
+    return OT_ERROR_NONE;
+}
+
+otError Client::UartDisable(void)
+{
+    mUartEnabled = false;
+    mUartTxBuf   = nullptr;
+    mUartTxLen   = 0;
+
+    return OT_ERROR_NONE;
+}
+
+otError Client::UartSend(const uint8_t *aBuf, uint16_t aBufLength)
+{
+    if (!mUartEnabled || mUartOutFd < 0 || aBuf == nullptr)
+    {
+        return OT_ERROR_FAILED;
+    }
+    if (mUartTxLen > 0)
+    {
+        return OT_ERROR_BUSY;
+    }
+
+    mUartTxBuf = aBuf;
+    mUartTxLen = aBufLength;
+
+    return OT_ERROR_NONE;
+}
+
+otError Client::UartFlush(void)
+{
+    if (!mUartEnabled || mUartOutFd < 0 || mUartTxBuf == nullptr || mUartTxLen == 0)
+    {
+        return OT_ERROR_INVALID_STATE;
+    }
+
+    while (mUartTxLen > 0)
+    {
+        ssize_t n = ::write(mUartOutFd, mUartTxBuf, mUartTxLen);
+
+        if (n > 0)
+        {
+            mUartTxBuf += n;
+            mUartTxLen = static_cast<uint16_t>(mUartTxLen - static_cast<uint16_t>(n));
+            continue;
+        }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            struct pollfd pfd = {mUartOutFd, POLLOUT, 0};
+
+            (void)::poll(&pfd, 1, 10);
+            continue;
+        }
+
+        mDisconnected = true;
+        return OT_ERROR_FAILED;
+    }
+
+    mUartTxBuf = nullptr;
+    otPlatUartSendDone();
+
+    return OT_ERROR_NONE;
+}
+
+void Client::FlushUartNonBlocking(void)
+{
+    if (!mUartEnabled || mUartOutFd < 0)
+    {
+        return;
+    }
+
+    // Loop briefly so chained Spinel frames queued via otPlatUartSendDone() drain promptly.
+    for (int iter = 0; iter < 16 && mUartTxLen > 0 && mUartTxBuf != nullptr; ++iter)
+    {
+        ssize_t n = ::write(mUartOutFd, mUartTxBuf, mUartTxLen);
+
+        if (n > 0)
+        {
+            mUartTxBuf += n;
+            mUartTxLen = static_cast<uint16_t>(mUartTxLen - static_cast<uint16_t>(n));
+            if (mUartTxLen == 0)
+            {
+                mUartTxBuf = nullptr;
+                otPlatUartSendDone();
+            }
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            break;
+        }
+        mDisconnected = true;
+        break;
+    }
+}
+
 void Client::ProcessDrivers(otInstance *aInstance)
 {
     mInstance = aInstance;
@@ -495,13 +750,139 @@ void Client::ProcessDrivers(otInstance *aInstance)
         return;
     }
 
-    DrainFrames(aInstance);
-    if (!mDisconnected && mRxBuffer.empty())
+    if (!mUartEnabled)
     {
-        if (RecvMoreBytes(250))
+        DrainFrames(aInstance);
+        if (!mDisconnected && mRxBuffer.empty())
         {
-            DrainFrames(aInstance);
+            if (RecvMoreBytes(250))
+            {
+                DrainFrames(aInstance);
+            }
         }
+        return;
+    }
+
+    // RCP mode: multiplex simulator socket + Spinel UART PTY descriptors.
+    DrainTasklets(aInstance);
+    FlushUartNonBlocking();
+    DrainFrames(aInstance);
+    if (mDisconnected || mPseudoResetRequested)
+    {
+        return;
+    }
+
+    struct pollfd pfds[3];
+    nfds_t        nfds    = 0;
+    int           sockIdx = -1;
+    int           inIdx   = -1;
+    int           outIdx  = -1;
+
+    if (mSockFd >= 0)
+    {
+        sockIdx      = static_cast<int>(nfds);
+        pfds[nfds++] = {mSockFd, POLLIN, 0};
+    }
+    if (mUartInFd >= 0)
+    {
+        inIdx        = static_cast<int>(nfds);
+        pfds[nfds++] = {mUartInFd, POLLIN, 0};
+    }
+    if (mUartOutFd >= 0 && mUartTxLen > 0)
+    {
+        outIdx       = static_cast<int>(nfds);
+        pfds[nfds++] = {mUartOutFd, POLLOUT, 0};
+    }
+
+    int timeoutMs = (mHasPendingTasklets || (aInstance != nullptr && otTaskletsArePending(aInstance))) ? 0 : 10;
+    int pr        = ::poll(pfds, nfds, timeoutMs);
+
+    if (pr < 0)
+    {
+        if (errno != EINTR)
+        {
+            mDisconnected = true;
+        }
+        return;
+    }
+
+    if (inIdx >= 0)
+    {
+        short rev = pfds[inIdx].revents;
+
+        if ((rev & (POLLERR | POLLNVAL)) != 0)
+        {
+            mDisconnected = true;
+            return;
+        }
+        if ((rev & POLLIN) != 0)
+        {
+            uint8_t rxBuf[256];
+
+            while (!mDisconnected && !mPseudoResetRequested)
+            {
+                ssize_t n = ::read(mUartInFd, rxBuf, sizeof(rxBuf));
+
+                if (n > 0)
+                {
+                    otPlatUartReceived(rxBuf, static_cast<uint16_t>(n));
+                    DrainTasklets(aInstance);
+                    FlushUartNonBlocking();
+                    continue;
+                }
+                if (n == 0)
+                {
+                    mDisconnected = true;
+                    return;
+                }
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    break;
+                }
+                mDisconnected = true;
+                return;
+            }
+        }
+        else if ((rev & POLLHUP) != 0)
+        {
+            mDisconnected = true;
+            return;
+        }
+    }
+
+    if (outIdx >= 0 && (pfds[outIdx].revents & POLLOUT) != 0)
+    {
+        FlushUartNonBlocking();
+    }
+
+    if (sockIdx >= 0 && !mDisconnected && !mPseudoResetRequested)
+    {
+        short rev = pfds[sockIdx].revents;
+
+        if ((rev & (POLLERR | POLLNVAL)) != 0)
+        {
+            mDisconnected = true;
+            return;
+        }
+        if ((rev & (POLLIN | POLLHUP)) != 0)
+        {
+            if (RecvMoreBytes(0))
+            {
+                DrainFrames(aInstance);
+            }
+        }
+    }
+
+    if (!mDisconnected && !mPseudoResetRequested)
+    {
+        DrainTasklets(aInstance);
+        FlushUartNonBlocking();
+        SyncAlarmToSim();
+        SyncStatusToSim(aInstance);
     }
 }
 
@@ -516,6 +897,33 @@ void Client::ProcessReadySocket(otInstance *aInstance)
 
     (void)RecvMoreBytes(0);
     DrainFrames(aInstance);
+}
+
+bool Client::HasPendingWork(otInstance *aInstance) const
+{
+    if (mDisconnected)
+    {
+        return false;
+    }
+
+    return !mRxBuffer.empty() || mHasPendingTasklets || (aInstance != nullptr && otTaskletsArePending(aInstance)) ||
+           (mUartEnabled && mUartTxLen > 0);
+}
+
+void Client::ProcessPendingWork(otInstance *aInstance)
+{
+    mInstance = aInstance;
+
+    if (mDisconnected)
+    {
+        return;
+    }
+
+    DrainFrames(aInstance);
+    DrainTasklets(aInstance);
+    FlushUartNonBlocking();
+    SyncAlarmToSim();
+    SyncStatusToSim(aInstance);
 }
 
 void Client::DrainFrames(otInstance *aInstance)
@@ -597,6 +1005,7 @@ void Client::SyncStatusToSim(otInstance *aInstance, bool aForce)
 
     Protocol::StatusInfoValue info;
 
+#if !OPENTHREAD_RADIO && (OPENTHREAD_FTD || OPENTHREAD_MTD)
     info.mRole        = ToWireRole(otThreadGetDeviceRole(aInstance));
     info.mRloc16      = otThreadGetRloc16(aInstance);
     info.mPartitionId = otThreadGetPartitionId(aInstance);
@@ -605,6 +1014,30 @@ void Client::SyncStatusToSim(otInstance *aInstance, bool aForce)
     {
         std::memcpy(info.mExtAddr.data(), ext->m8, 8);
     }
+#else
+    // RCP mode: derive observable address & role hint from configured MAC short/extended address.
+    info.mRloc16      = mRadioCtx.mShortAddress;
+    info.mPartitionId = 0;
+    if (mRadioState == OT_RADIO_STATE_DISABLED)
+    {
+        info.mRole = 0; // disabled
+    }
+    else if (mRadioCtx.mShortAddress == OT_RADIO_INVALID_SHORT_ADDR)
+    {
+        info.mRole = 1; // detached
+    }
+    else if ((mRadioCtx.mShortAddress & 0x03FFu) == 0)
+    {
+        info.mRole = 3; // router
+    }
+    else
+    {
+        info.mRole = 2; // child
+    }
+
+    // mRadioCtx.mExtAddress is stored in big-endian byte order (reversed from little-endian in SetExtendedAddress).
+    std::memcpy(info.mExtAddr.data(), mRadioCtx.mExtAddress.m8, 8);
+#endif
 
     bool changed = !mHasPushedStatus || (info.mRole != mLastStatus.mRole) || (info.mRloc16 != mLastStatus.mRloc16) ||
                    (info.mPartitionId != mLastStatus.mPartitionId) || (info.mExtAddr != mLastStatus.mExtAddr);
@@ -640,6 +1073,8 @@ void Client::SendRadioState(void)
 
 void Client::SendStepDone(const std::vector<uint8_t> *aAckPsdu)
 {
+    FlushUartNonBlocking();
+
     Protocol::Frame done;
 
     done.mType        = Protocol::MsgType::kStepDone;
@@ -856,6 +1291,147 @@ void Client::HandleFrame(otInstance *aInstance, const Protocol::Frame &aFrame)
         if (line.has_value() && mCliCallback != nullptr)
         {
             mCliCallback(line->c_str(), mCliContext);
+        }
+        DrainTasklets(aInstance);
+        SyncAlarmToSim();
+        SyncStatusToSim(aInstance);
+        SendStepDone();
+        return;
+    }
+
+    case Protocol::MsgType::kTrelPeer:
+    {
+        auto                 addr    = aFrame.GetNetAddr();
+        const Protocol::Tlv *payload = aFrame.FindTlv(Protocol::TlvType::kPayload);
+        bool                 removed = (aFrame.mFlags & Protocol::kFlagCancel) != 0;
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE && !OPENTHREAD_CONFIG_TREL_MANAGE_DNSSD_ENABLE
+        if (aInstance != nullptr && mTrelEnabled && addr.has_value())
+        {
+            otPlatTrelPeerInfo info;
+
+            std::memset(&info, 0, sizeof(info));
+            info.mRemoved   = removed;
+            info.mTxtData   = (payload != nullptr && !payload->mValue.empty()) ? payload->mValue.data() : nullptr;
+            info.mTxtLength = (payload != nullptr) ? static_cast<uint16_t>(payload->mValue.size()) : 0;
+            std::memcpy(info.mSockAddr.mAddress.mFields.m8, addr->mSrcIp6.data(), 16);
+            info.mSockAddr.mPort = addr->mSrcPort;
+            otPlatTrelHandleDiscoveredPeerInfo(aInstance, &info);
+        }
+#else
+        (void)addr;
+        (void)payload;
+        (void)removed;
+#endif
+        DrainTasklets(aInstance);
+        SyncAlarmToSim();
+        SyncStatusToSim(aInstance);
+        SendStepDone();
+        return;
+    }
+
+    case Protocol::MsgType::kTrelPacket:
+    {
+        auto                 addr    = aFrame.GetNetAddr();
+        const Protocol::Tlv *payload = aFrame.FindTlv(Protocol::TlvType::kPayload);
+
+        if (addr.has_value() && payload != nullptr)
+        {
+            mTrelCounters.mRxPackets += 1;
+            mTrelCounters.mRxBytes += payload->mValue.size();
+
+            if (mTrelPacketCallback != nullptr)
+            {
+                mTrelPacketCallback(addr->mSrcIp6.data(), addr->mSrcPort, addr->mDstIp6.data(), addr->mDstPort,
+                                    payload->mValue.data(), static_cast<uint16_t>(payload->mValue.size()),
+                                    mTrelPacketContext);
+            }
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
+            if (aInstance != nullptr && mTrelEnabled && !payload->mValue.empty())
+            {
+                std::vector<uint8_t> mutableBuf = payload->mValue;
+                otSockAddr           sender;
+
+                std::memset(&sender, 0, sizeof(sender));
+                std::memcpy(sender.mAddress.mFields.m8, addr->mSrcIp6.data(), 16);
+                sender.mPort = addr->mSrcPort;
+                otPlatTrelHandleReceived(aInstance, mutableBuf.data(), static_cast<uint16_t>(mutableBuf.size()),
+                                         &sender);
+            }
+#endif
+        }
+        DrainTasklets(aInstance);
+        SyncAlarmToSim();
+        SyncStatusToSim(aInstance);
+        SendStepDone();
+        return;
+    }
+
+    case Protocol::MsgType::kInfraIfPacket:
+    {
+        auto                 addr    = aFrame.GetNetAddr();
+        const Protocol::Tlv *payload = aFrame.FindTlv(Protocol::TlvType::kPayload);
+
+        if (addr.has_value() && payload != nullptr)
+        {
+            if (mInfraIfPacketCallback != nullptr)
+            {
+                mInfraIfPacketCallback(addr->mSrcIp6.data(), addr->mSrcPort, addr->mDstIp6.data(), addr->mDstPort,
+                                       payload->mValue.data(), static_cast<uint16_t>(payload->mValue.size()),
+                                       mInfraIfPacketContext);
+            }
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+            if (aInstance != nullptr && mInfraIfEnabled && !payload->mValue.empty())
+            {
+                if (addr->mDstPort == 0)
+                {
+                    otIp6Address srcAddr;
+
+                    std::memcpy(srcAddr.mFields.m8, addr->mSrcIp6.data(), 16);
+                    otPlatInfraIfRecvIcmp6Nd(aInstance, mInfraIfIndex, &srcAddr, payload->mValue.data(),
+                                             static_cast<uint16_t>(payload->mValue.size()));
+                }
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_CLIENT_ENABLE
+                else if (mDhcp6PdListening && addr->mDstPort == 546)
+                {
+                    otMessage *msg = otIp6NewMessage(aInstance, nullptr);
+
+                    if (msg != nullptr)
+                    {
+                        if (otMessageAppend(msg, payload->mValue.data(),
+                                            static_cast<uint16_t>(payload->mValue.size())) == OT_ERROR_NONE)
+                        {
+                            otPlatInfraIfDhcp6PdClientHandleReceived(aInstance, msg, mInfraIfIndex);
+                        }
+                        else
+                        {
+                            otMessageFree(msg);
+                        }
+                    }
+                }
+#endif
+            }
+#endif
+        }
+        DrainTasklets(aInstance);
+        SyncAlarmToSim();
+        SyncStatusToSim(aInstance);
+        SendStepDone();
+        return;
+    }
+
+    case Protocol::MsgType::kHostSocket:
+    {
+        auto                 addr    = aFrame.GetNetAddr();
+        const Protocol::Tlv *payload = aFrame.FindTlv(Protocol::TlvType::kPayload);
+
+        if (addr.has_value() && payload != nullptr && mHostUdpPacketCallback != nullptr)
+        {
+            mHostUdpPacketCallback(addr->mSrcIp6.data(), addr->mSrcPort, addr->mDstIp6.data(), addr->mDstPort,
+                                   payload->mValue.data(), static_cast<uint16_t>(payload->mValue.size()),
+                                   mHostUdpPacketContext);
         }
         DrainTasklets(aInstance);
         SyncAlarmToSim();
@@ -1293,6 +1869,431 @@ void Client::SendLog(otLogLevel aLevel, const char *aLine)
     (void)SendFrame(msg);
 }
 
+bool Client::GetInfraIfLinkLocalAddress(uint8_t aAddr[16]) const
+{
+    if (aAddr == nullptr || mNodeId == 0)
+    {
+        return false;
+    }
+
+    auto ll = MakeLinkLocalIp6(mNodeId);
+
+    std::memcpy(aAddr, ll.data(), 16);
+
+    return true;
+}
+
+bool Client::GetBackboneAddress(uint8_t aAddr[16]) const
+{
+    if (aAddr == nullptr || mNodeId == 0)
+    {
+        return false;
+    }
+
+    auto bb = MakeBackboneIp6(mNodeId);
+
+    std::memcpy(aAddr, bb.data(), 16);
+
+    return true;
+}
+
+void Client::SetTrelPacketHandler(otRfSimPacketCallback aCallback, void *aContext)
+{
+    mTrelPacketCallback = aCallback;
+    mTrelPacketContext  = aContext;
+}
+
+void Client::SetInfraIfPacketHandler(otRfSimPacketCallback aCallback, void *aContext)
+{
+    mInfraIfPacketCallback = aCallback;
+    mInfraIfPacketContext  = aContext;
+}
+
+void Client::SetHostUdpPacketHandler(otRfSimPacketCallback aCallback, void *aContext)
+{
+    mHostUdpPacketCallback = aCallback;
+    mHostUdpPacketContext  = aContext;
+}
+
+void Client::TrelEnable(uint16_t *aUdpPort)
+{
+    uint16_t port = static_cast<uint16_t>(49152u + (mNodeId % 16000u));
+
+    mTrelEnabled = true;
+    mTrelPort    = port;
+    if (aUdpPort != nullptr)
+    {
+        *aUdpPort = port;
+    }
+}
+
+void Client::TrelDisable(void)
+{
+    if (!mTrelEnabled)
+    {
+        return;
+    }
+
+    mTrelEnabled = false;
+    mTrelPort    = 0;
+
+    if (!mDisconnected)
+    {
+        Protocol::Frame msg;
+
+        msg.mType        = Protocol::MsgType::kTrelPeer;
+        msg.mFlags       = Protocol::kFlagCancel;
+        msg.mTimestampUs = mNowUs;
+        (void)SendFrame(msg);
+    }
+}
+
+bool Client::TrelRegisterService(uint16_t aPort, const uint8_t *aTxtData, uint16_t aTxtLength)
+{
+    if (mDisconnected)
+    {
+        return false;
+    }
+
+    mTrelEnabled = true;
+    mTrelPort    = (aPort != 0) ? aPort : static_cast<uint16_t>(49152u + (mNodeId % 16000u));
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = mTrelPort;
+    addr.mSrcIp6  = MakeBackboneIp6(mNodeId);
+
+    msg.mType        = Protocol::MsgType::kTrelPeer;
+    msg.mTimestampUs = mNowUs;
+    msg.AddNetAddr(addr);
+    if (aTxtData != nullptr && aTxtLength > 0)
+    {
+        msg.AddBytes(Protocol::TlvType::kPayload, aTxtData, aTxtLength);
+    }
+
+    return SendFrame(msg);
+}
+
+bool Client::TrelSend(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength)
+{
+    if (!mTrelEnabled || mDisconnected || aDstIp6 == nullptr || (aPayload == nullptr && aLength > 0))
+    {
+        mTrelCounters.mTxFailure += 1;
+        return false;
+    }
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = mTrelPort;
+    addr.mDstPort = aDstPort;
+    addr.mSrcIp6  = MakeBackboneIp6(mNodeId);
+    std::memcpy(addr.mDstIp6.data(), aDstIp6, 16);
+
+    msg.mType        = Protocol::MsgType::kTrelPacket;
+    msg.mTimestampUs = mNowUs;
+    msg.AddNetAddr(addr);
+    msg.AddBytes(Protocol::TlvType::kPayload, aPayload, aLength);
+
+    if (!SendFrame(msg))
+    {
+        mTrelCounters.mTxFailure += 1;
+        return false;
+    }
+
+    mTrelCounters.mTxPackets += 1;
+    mTrelCounters.mTxBytes += aLength;
+
+    return true;
+}
+
+void Client::TrelResetCounters(void) { std::memset(&mTrelCounters, 0, sizeof(mTrelCounters)); }
+
+void Client::EnsureInfraIfJoined(uint32_t aInfraIfIndex)
+{
+    if (mInfraIfEnabled && mInfraIfIndex == aInfraIfIndex)
+    {
+        return;
+    }
+
+    mInfraIfIndex   = (aInfraIfIndex != 0) ? aInfraIfIndex : 1u;
+    mInfraIfEnabled = true;
+
+    if (!mDisconnected)
+    {
+        Protocol::Frame msg;
+
+        msg.mType        = Protocol::MsgType::kInfraIfState;
+        msg.mTimestampUs = mNowUs;
+        (void)SendFrame(msg);
+    }
+}
+
+bool Client::InfraIfInit(otInstance *aInstance, uint32_t aInfraIfIndex)
+{
+    if (mDisconnected)
+    {
+        return false;
+    }
+
+    EnsureInfraIfJoined(aInfraIfIndex);
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+    if (aInstance != nullptr)
+    {
+        (void)otPlatInfraIfStateChanged(aInstance, mInfraIfIndex, true);
+    }
+#else
+    (void)aInstance;
+#endif
+
+    return true;
+}
+
+void Client::InfraIfDeinit(otInstance *aInstance)
+{
+    if (!mInfraIfEnabled)
+    {
+        return;
+    }
+
+    uint32_t prevIndex = mInfraIfIndex;
+
+    mInfraIfEnabled   = false;
+    mDhcp6PdListening = false;
+
+    if (!mDisconnected)
+    {
+        Protocol::Frame msg;
+
+        msg.mType        = Protocol::MsgType::kInfraIfState;
+        msg.mFlags       = Protocol::kFlagCancel;
+        msg.mTimestampUs = mNowUs;
+        (void)SendFrame(msg);
+    }
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+    if (aInstance != nullptr)
+    {
+        (void)otPlatInfraIfStateChanged(aInstance, prevIndex, false);
+    }
+#else
+    (void)aInstance;
+    (void)prevIndex;
+#endif
+}
+
+bool Client::InfraIfHasAddress(uint32_t aInfraIfIndex, const otIp6Address *aAddress)
+{
+    if (aAddress == nullptr)
+    {
+        return false;
+    }
+
+    EnsureInfraIfJoined(aInfraIfIndex);
+
+    if (aInfraIfIndex != mInfraIfIndex)
+    {
+        return false;
+    }
+
+    auto ll = MakeLinkLocalIp6(mNodeId);
+    auto bb = MakeBackboneIp6(mNodeId);
+
+    return (std::memcmp(aAddress->mFields.m8, ll.data(), 16) == 0) ||
+           (std::memcmp(aAddress->mFields.m8, bb.data(), 16) == 0);
+}
+
+otError Client::InfraIfSendIcmp6Nd(uint32_t            aInfraIfIndex,
+                                   const otIp6Address *aDestAddress,
+                                   const uint8_t      *aBuffer,
+                                   uint16_t            aBufferLength)
+{
+    if (mDisconnected || aDestAddress == nullptr || aBuffer == nullptr || aBufferLength == 0)
+    {
+        return OT_ERROR_FAILED;
+    }
+
+    EnsureInfraIfJoined(aInfraIfIndex);
+    if (aInfraIfIndex != mInfraIfIndex)
+    {
+        return OT_ERROR_INVALID_ARGS;
+    }
+
+    return InfraIfSendPacket(aDestAddress->mFields.m8, 0, aBuffer, aBufferLength) ? OT_ERROR_NONE : OT_ERROR_FAILED;
+}
+
+bool Client::InfraIfSendPacket(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength)
+{
+    if (mDisconnected || aDstIp6 == nullptr || (aPayload == nullptr && aLength > 0))
+    {
+        return false;
+    }
+
+    EnsureInfraIfJoined(mInfraIfIndex);
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = static_cast<uint16_t>(mInfraIfIndex & 0xFFFFu);
+    addr.mDstPort = aDstPort;
+    addr.mSrcIp6  = MakeLinkLocalIp6(mNodeId);
+    std::memcpy(addr.mDstIp6.data(), aDstIp6, 16);
+
+    msg.mType        = Protocol::MsgType::kInfraIfPacket;
+    msg.mTimestampUs = mNowUs;
+    msg.AddNetAddr(addr);
+    msg.AddBytes(Protocol::TlvType::kPayload, aPayload, aLength);
+
+    return SendFrame(msg);
+}
+
+otError Client::InfraIfGetLinkLayerAddress(uint32_t aInfraIfIndex, otPlatInfraIfLinkLayerAddress *aAddr)
+{
+    if (aAddr == nullptr)
+    {
+        return OT_ERROR_FAILED;
+    }
+
+    EnsureInfraIfJoined(aInfraIfIndex);
+    if (aInfraIfIndex != mInfraIfIndex)
+    {
+        return OT_ERROR_FAILED;
+    }
+
+    std::memset(aAddr, 0, sizeof(*aAddr));
+    aAddr->mLength     = 6;
+    aAddr->mAddress[0] = 0x02; // Locally administered unicast MAC
+    aAddr->mAddress[1] = 0x00;
+    aAddr->mAddress[2] = static_cast<uint8_t>((mNodeId >> 24u) & 0xFFu);
+    aAddr->mAddress[3] = static_cast<uint8_t>((mNodeId >> 16u) & 0xFFu);
+    aAddr->mAddress[4] = static_cast<uint8_t>((mNodeId >> 8u) & 0xFFu);
+    aAddr->mAddress[5] = static_cast<uint8_t>(mNodeId & 0xFFu);
+
+    return OT_ERROR_NONE;
+}
+
+void Client::InfraIfDhcp6PdSetListening(bool aEnable, uint32_t aInfraIfIndex)
+{
+    if (aEnable)
+    {
+        EnsureInfraIfJoined(aInfraIfIndex);
+    }
+    mDhcp6PdListening = aEnable;
+}
+
+void Client::InfraIfDhcp6PdSend(otMessage *aMessage, const otIp6Address *aDestAddress, uint32_t aInfraIfIndex)
+{
+#if !OPENTHREAD_RADIO && (OPENTHREAD_FTD || OPENTHREAD_MTD)
+    if (aMessage == nullptr)
+    {
+        return;
+    }
+
+    if (!mDisconnected && aDestAddress != nullptr)
+    {
+        uint16_t             len = otMessageGetLength(aMessage);
+        std::vector<uint8_t> buf(len);
+
+        if (len > 0)
+        {
+            (void)otMessageRead(aMessage, 0, buf.data(), len);
+        }
+
+        EnsureInfraIfJoined(aInfraIfIndex);
+
+        Protocol::Frame        msg;
+        Protocol::NetAddrValue addr;
+
+        addr.mSrcPort = 546;
+        addr.mDstPort = 547;
+        addr.mSrcIp6  = MakeLinkLocalIp6(mNodeId);
+        std::memcpy(addr.mDstIp6.data(), aDestAddress->mFields.m8, 16);
+
+        msg.mType        = Protocol::MsgType::kInfraIfPacket;
+        msg.mTimestampUs = mNowUs;
+        msg.AddNetAddr(addr);
+        msg.AddBytes(Protocol::TlvType::kPayload, buf.data(), buf.size());
+        (void)SendFrame(msg);
+    }
+
+    otMessageFree(aMessage);
+#else
+    (void)aMessage;
+    (void)aDestAddress;
+    (void)aInfraIfIndex;
+#endif
+}
+
+bool Client::HostUdpBind(uint16_t aPort)
+{
+    if (mDisconnected || aPort == 0)
+    {
+        return false;
+    }
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = aPort;
+    addr.mSrcIp6  = MakeBackboneIp6(mNodeId);
+
+    msg.mType        = Protocol::MsgType::kHostSocket;
+    msg.mTimestampUs = mNowUs;
+    msg.AddNetAddr(addr);
+
+    return SendFrame(msg);
+}
+
+bool Client::HostUdpUnbind(uint16_t aPort)
+{
+    if (mDisconnected || aPort == 0)
+    {
+        return false;
+    }
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = aPort;
+    addr.mSrcIp6  = MakeBackboneIp6(mNodeId);
+
+    msg.mType        = Protocol::MsgType::kHostSocket;
+    msg.mFlags       = Protocol::kFlagCancel;
+    msg.mTimestampUs = mNowUs;
+    msg.AddNetAddr(addr);
+
+    return SendFrame(msg);
+}
+
+bool Client::HostUdpSend(uint16_t       aSrcPort,
+                         const uint8_t  aDstIp6[16],
+                         uint16_t       aDstPort,
+                         const uint8_t *aPayload,
+                         uint16_t       aLength)
+{
+    if (mDisconnected || aDstIp6 == nullptr || (aPayload == nullptr && aLength > 0))
+    {
+        return false;
+    }
+
+    Protocol::Frame        msg;
+    Protocol::NetAddrValue addr;
+
+    addr.mSrcPort = aSrcPort;
+    addr.mDstPort = aDstPort;
+    addr.mSrcIp6  = MakeBackboneIp6(mNodeId);
+    std::memcpy(addr.mDstIp6.data(), aDstIp6, 16);
+
+    msg.mType        = Protocol::MsgType::kHostSocket;
+    msg.mTimestampUs = mNowUs;
+    msg.AddNetAddr(addr);
+    msg.AddBytes(Protocol::TlvType::kPayload, aPayload, aLength);
+
+    return SendFrame(msg);
+}
+
 } // namespace RfSim
 } // namespace otns
 
@@ -1302,6 +2303,8 @@ extern "C" {
 
 //---------------------------------------------------------------------------------------------------------------------
 // Public ot-rfsim v3 Library API
+
+void otRfSimSetAppName(const char *aName) { Client::Get().SetAppName((aName != nullptr) ? aName : ""); }
 
 void otRfSimConfigure(const char *aEndpoint, uint32_t aNodeId, uint64_t aSeed)
 {
@@ -1329,6 +2332,62 @@ void otRfSimSendCliOutput(const char *aText, size_t aLength) { Client::Get().Sen
 
 bool otRfSimCompleteStartup(otInstance *aInstance) { return Client::Get().CompleteStartup(aInstance); }
 
+bool otRfSimInitInfraIf(otInstance *aInstance, uint32_t aInfraIfIndex)
+{
+    return Client::Get().InfraIfInit(aInstance, aInfraIfIndex);
+}
+
+void otRfSimDeinitInfraIf(otInstance *aInstance) { Client::Get().InfraIfDeinit(aInstance); }
+
+bool otRfSimGetInfraIfLinkLocalAddress(uint8_t aAddr[16]) { return Client::Get().GetInfraIfLinkLocalAddress(aAddr); }
+
+bool otRfSimGetBackboneAddress(uint8_t aAddr[16]) { return Client::Get().GetBackboneAddress(aAddr); }
+
+void otRfSimSetTrelPacketHandler(otRfSimPacketCallback aCallback, void *aContext)
+{
+    Client::Get().SetTrelPacketHandler(aCallback, aContext);
+}
+
+void otRfSimSetInfraIfPacketHandler(otRfSimPacketCallback aCallback, void *aContext)
+{
+    Client::Get().SetInfraIfPacketHandler(aCallback, aContext);
+}
+
+void otRfSimSetHostUdpPacketHandler(otRfSimPacketCallback aCallback, void *aContext)
+{
+    Client::Get().SetHostUdpPacketHandler(aCallback, aContext);
+}
+
+bool otRfSimRegisterTrelService(uint16_t aUdpPort, const uint8_t *aTxtData, uint16_t aTxtLength)
+{
+    return Client::Get().TrelRegisterService(aUdpPort, aTxtData, aTxtLength);
+}
+
+void otRfSimUnregisterTrelService(void) { Client::Get().TrelDisable(); }
+
+bool otRfSimSendTrelPacket(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength)
+{
+    return Client::Get().TrelSend(aDstIp6, aDstPort, aPayload, aLength);
+}
+
+bool otRfSimSendInfraIfPacket(const uint8_t aDstIp6[16], uint16_t aDstPort, const uint8_t *aPayload, uint16_t aLength)
+{
+    return Client::Get().InfraIfSendPacket(aDstIp6, aDstPort, aPayload, aLength);
+}
+
+bool otRfSimBindHostUdp(uint16_t aPort) { return Client::Get().HostUdpBind(aPort); }
+
+bool otRfSimUnbindHostUdp(uint16_t aPort) { return Client::Get().HostUdpUnbind(aPort); }
+
+bool otRfSimSendHostUdp(uint16_t       aSrcPort,
+                        const uint8_t  aDstIp6[16],
+                        uint16_t       aDstPort,
+                        const uint8_t *aPayload,
+                        uint16_t       aLength)
+{
+    return Client::Get().HostUdpSend(aSrcPort, aDstIp6, aDstPort, aPayload, aLength);
+}
+
 //---------------------------------------------------------------------------------------------------------------------
 // OpenThread System & Select API (for Standalone CLI, OTBR, and Matter Library Mode)
 
@@ -1337,31 +2396,129 @@ void otSysInit(int aArgCount, char *aArgVector[])
     if (Client::Get().PseudoResetRequested())
     {
         Client::Get().ClearPseudoReset();
+        Client::Get().ResetForPseudoReset();
         return;
     }
 
-    std::string endpoint;
-    uint32_t    nodeId = 0;
-    uint64_t    seed   = 1;
+    std::string              endpoint;
+    std::string              appName;
+    uint32_t                 nodeId  = 0;
+    uint64_t                 seed    = 1;
+    bool                     hasSeed = false;
+    std::vector<std::string> positional;
+
+    auto extractEq = [](const std::string &aArg, const char *aPrefix, std::string &aVal) -> bool {
+        size_t len = std::strlen(aPrefix);
+
+        if (aArg.size() > len && aArg.compare(0, len, aPrefix) == 0)
+        {
+            aVal = aArg.substr(len);
+            return true;
+        }
+        return false;
+    };
 
     for (int i = 1; i < aArgCount; ++i)
     {
-        if (std::strcmp(aArgVector[i], "--endpoint") == 0 && i + 1 < aArgCount)
+        if (aArgVector[i] == nullptr)
+        {
+            continue;
+        }
+
+        std::string arg = aArgVector[i];
+        std::string eqVal;
+
+        if ((arg == "--endpoint" || arg == "--socket") && i + 1 < aArgCount)
         {
             endpoint = aArgVector[++i];
         }
-        else if (std::strcmp(aArgVector[i], "--socket") == 0 && i + 1 < aArgCount)
+        else if (extractEq(arg, "--endpoint=", eqVal) || extractEq(arg, "--socket=", eqVal))
         {
-            endpoint = aArgVector[++i];
+            endpoint = eqVal;
         }
-        else if (std::strcmp(aArgVector[i], "--node-id") == 0 && i + 1 < aArgCount)
+        else if (arg == "--node-id" && i + 1 < aArgCount)
         {
             nodeId = static_cast<uint32_t>(std::strtoul(aArgVector[++i], nullptr, 0));
         }
-        else if (std::strcmp(aArgVector[i], "--seed") == 0 && i + 1 < aArgCount)
+        else if (extractEq(arg, "--node-id=", eqVal))
         {
-            seed = static_cast<uint64_t>(std::strtoull(aArgVector[++i], nullptr, 0));
+            nodeId = static_cast<uint32_t>(std::strtoul(eqVal.c_str(), nullptr, 0));
         }
+        else if (arg == "--seed" && i + 1 < aArgCount)
+        {
+            seed    = static_cast<uint64_t>(std::strtoull(aArgVector[++i], nullptr, 0));
+            hasSeed = true;
+        }
+        else if (extractEq(arg, "--seed=", eqVal))
+        {
+            seed    = static_cast<uint64_t>(std::strtoull(eqVal.c_str(), nullptr, 0));
+            hasSeed = true;
+        }
+        else if ((arg == "--label" || arg == "--app-name") && i + 1 < aArgCount)
+        {
+            appName = aArgVector[++i];
+        }
+        else if (extractEq(arg, "--label=", eqVal) || extractEq(arg, "--app-name=", eqVal))
+        {
+            appName = eqVal;
+        }
+        else if (arg == "--thread-args" && i + 1 < aArgCount)
+        {
+            positional.push_back(aArgVector[++i]);
+        }
+        else if (extractEq(arg, "--thread-args=", eqVal))
+        {
+            positional.push_back(eqVal);
+        }
+        else if (!arg.empty() && arg[0] != '-')
+        {
+            positional.push_back(arg);
+        }
+    }
+
+    // Parse Matter / OTNS v2 positional or --thread-args tokens: <nodeId> <socket> [seed]
+    for (const auto &tok : positional)
+    {
+        if (endpoint.empty() && otns::RfSim::IsEndpointToken(tok))
+        {
+            endpoint = tok;
+            continue;
+        }
+
+        uint64_t num = 0;
+
+        if (otns::RfSim::ParseUnsignedToken(tok, num))
+        {
+            if (nodeId == 0)
+            {
+                nodeId = static_cast<uint32_t>(num);
+            }
+            else if (!hasSeed)
+            {
+                seed    = num;
+                hasSeed = true;
+            }
+        }
+    }
+
+    if (endpoint.empty())
+    {
+        if (const char *envEp = std::getenv("OTNS_RFSIM_ENDPOINT"))
+        {
+            endpoint = envEp;
+        }
+    }
+    if (nodeId == 0)
+    {
+        if (const char *envId = std::getenv("OTNS_NODE_ID"))
+        {
+            nodeId = static_cast<uint32_t>(std::strtoul(envId, nullptr, 0));
+        }
+    }
+
+    if (!appName.empty())
+    {
+        Client::Get().SetAppName(appName);
     }
 
     if (!endpoint.empty())
@@ -1387,7 +2544,6 @@ void otSysUpdateEvents(otInstance     *aInstance,
 {
     int fd = Client::Get().GetSocketFd();
 
-    (void)aInstance;
     (void)aWriteFdSet;
 
     if (fd >= 0 && aReadFdSet != nullptr)
@@ -1403,10 +2559,18 @@ void otSysUpdateEvents(otInstance     *aInstance,
         }
     }
 
-    if (aTimeout != nullptr && aTimeout->tv_sec > 1)
+    if (aTimeout != nullptr)
     {
-        aTimeout->tv_sec  = 1;
-        aTimeout->tv_usec = 0;
+        if (Client::Get().HasPendingWork(aInstance))
+        {
+            aTimeout->tv_sec  = 0;
+            aTimeout->tv_usec = 0;
+        }
+        else if (aTimeout->tv_sec > 1)
+        {
+            aTimeout->tv_sec  = 1;
+            aTimeout->tv_usec = 0;
+        }
     }
 }
 
@@ -1424,6 +2588,8 @@ void otSysProcessEvents(otInstance   *aInstance,
     {
         Client::Get().ProcessReadySocket(aInstance);
     }
+
+    Client::Get().ProcessPendingWork(aInstance);
 }
 
 //---------------------------------------------------------------------------------------------------------------------
@@ -1848,5 +3014,152 @@ uint32_t otPlatRadioGetPreferredChannelMask(otInstance *aInstance)
     (void)aInstance;
     return OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MASK;
 }
+
+uint32_t otPlatRadioGetBusSpeed(otInstance *aInstance)
+{
+    (void)aInstance;
+    return 1000000u;
+}
+
+void otPlatRadioSetRxOnWhenIdle(otInstance *aInstance, bool aEnable)
+{
+    (void)aInstance;
+    (void)aEnable;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+// Spinel UART Platform Hooks (used by ot-rcp-rfsim)
+
+OT_TOOL_WEAK void otPlatUartReceived(const uint8_t *aBuf, uint16_t aBufLength)
+{
+    (void)aBuf;
+    (void)aBufLength;
+}
+
+OT_TOOL_WEAK void otPlatUartSendDone(void) {}
+
+otError otPlatUartEnable(void) { return Client::Get().UartEnable(); }
+
+otError otPlatUartDisable(void) { return Client::Get().UartDisable(); }
+
+otError otPlatUartSend(const uint8_t *aBuf, uint16_t aBufLength) { return Client::Get().UartSend(aBuf, aBufLength); }
+
+otError otPlatUartFlush(void) { return Client::Get().UartFlush(); }
+
+//---------------------------------------------------------------------------------------------------------------------
+// TREL Platform Hooks (OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE)
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
+
+void otPlatTrelEnable(otInstance *aInstance, uint16_t *aUdpPort)
+{
+    (void)aInstance;
+    Client::Get().TrelEnable(aUdpPort);
+}
+
+void otPlatTrelDisable(otInstance *aInstance)
+{
+    (void)aInstance;
+    Client::Get().TrelDisable();
+}
+
+void otPlatTrelNotifyPeerSocketAddressDifference(otInstance       *aInstance,
+                                                 const otSockAddr *aPeerSockAddr,
+                                                 const otSockAddr *aRxSockAddr)
+{
+    (void)aInstance;
+    (void)aPeerSockAddr;
+    (void)aRxSockAddr;
+}
+
+void otPlatTrelRegisterService(otInstance *aInstance, uint16_t aPort, const uint8_t *aTxtData, uint8_t aTxtLength)
+{
+    (void)aInstance;
+    (void)Client::Get().TrelRegisterService(aPort, aTxtData, aTxtLength);
+}
+
+void otPlatTrelSend(otInstance       *aInstance,
+                    const uint8_t    *aUdpPayload,
+                    uint16_t          aUdpPayloadLen,
+                    const otSockAddr *aDestSockAddr)
+{
+    (void)aInstance;
+    if (aDestSockAddr == nullptr)
+    {
+        return;
+    }
+    (void)Client::Get().TrelSend(aDestSockAddr->mAddress.mFields.m8, aDestSockAddr->mPort, aUdpPayload, aUdpPayloadLen);
+}
+
+const otPlatTrelCounters *otPlatTrelGetCounters(otInstance *aInstance)
+{
+    (void)aInstance;
+    return Client::Get().TrelGetCounters();
+}
+
+void otPlatTrelResetCounters(otInstance *aInstance)
+{
+    (void)aInstance;
+    Client::Get().TrelResetCounters();
+}
+
+#endif // !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
+
+//---------------------------------------------------------------------------------------------------------------------
+// Adjacent Infrastructure Link (Infra-If) Platform Hooks (OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE)
+
+#if !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+
+bool otPlatInfraIfHasAddress(otInstance *aInstance, uint32_t aInfraIfIndex, const otIp6Address *aAddress)
+{
+    (void)aInstance;
+    return Client::Get().InfraIfHasAddress(aInfraIfIndex, aAddress);
+}
+
+otError otPlatInfraIfSendIcmp6Nd(otInstance         *aInstance,
+                                 uint32_t            aInfraIfIndex,
+                                 const otIp6Address *aDestAddress,
+                                 const uint8_t      *aBuffer,
+                                 uint16_t            aBufferLength)
+{
+    (void)aInstance;
+    return Client::Get().InfraIfSendIcmp6Nd(aInfraIfIndex, aDestAddress, aBuffer, aBufferLength);
+}
+
+otError otPlatInfraIfDiscoverNat64Prefix(otInstance *aInstance, uint32_t aInfraIfIndex)
+{
+    (void)aInstance;
+    (void)aInfraIfIndex;
+    return OT_ERROR_NOT_IMPLEMENTED;
+}
+
+otError otPlatGetInfraIfLinkLayerAddress(otInstance                    *aInstance,
+                                         uint32_t                       aIfIndex,
+                                         otPlatInfraIfLinkLayerAddress *aInfraIfLinkLayerAddress)
+{
+    (void)aInstance;
+    return Client::Get().InfraIfGetLinkLayerAddress(aIfIndex, aInfraIfLinkLayerAddress);
+}
+
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_CLIENT_ENABLE
+
+void otPlatInfraIfDhcp6PdClientSetListeningEnabled(otInstance *aInstance, bool aEnable, uint32_t aInfraIfIndex)
+{
+    (void)aInstance;
+    Client::Get().InfraIfDhcp6PdSetListening(aEnable, aInfraIfIndex);
+}
+
+void otPlatInfraIfDhcp6PdClientSend(otInstance   *aInstance,
+                                    otMessage    *aMessage,
+                                    otIp6Address *aDestAddress,
+                                    uint32_t      aInfraIfIndex)
+{
+    (void)aInstance;
+    Client::Get().InfraIfDhcp6PdSend(aMessage, aDestAddress, aInfraIfIndex);
+}
+
+#endif // OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_CLIENT_ENABLE
+
+#endif // !OPENTHREAD_RADIO && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
 
 } // extern "C"

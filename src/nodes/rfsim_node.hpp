@@ -84,6 +84,7 @@ public:
 
     bool HasPendingTasklets(void) const override { return false; }
     void ProcessTasklets(void) override {}
+    void PollExternal(void) override;
 
     std::string        ExecuteCli(const std::string &aCommand) override;
     std::string        TakeCliOutput(void) override;
@@ -91,6 +92,7 @@ public:
 
     bool OnRadioRxDone(const Core::RawFrame &aRxFrame, Core::RawFrame &aAckOut) override;
     void OnTrelPacket(const Core::NetPacket &aPacket) override;
+    void OnTrelPeerChange(const Core::TrelPeerRecord &aPeer, bool aRemoved) override;
     void OnInfraIfPacket(const Core::NetPacket &aPacket) override;
     void OnHostUdpPacket(const Core::NetPacket &aPacket) override;
 
@@ -105,9 +107,10 @@ private:
     void ReapChildProcess(void);
 
     Core::Simulation     &mSim;
-    Rf::NodeId            mId           = Rf::kInvalidNodeId;
-    Rf::Position3D        mPos          = {};
-    double                mRadioRange   = Rf::kDefaultRadioRange;
+    Rf::NodeId            mId         = Rf::kInvalidNodeId;
+    Rf::Position3D        mPos        = {};
+    double                mRadioRange = Rf::kDefaultRadioRange;
+    std::string           mLabel;
     bool                  mEnabled      = true;
     int                   mSockFd       = -1;
     pid_t                 mChildPid     = -1;

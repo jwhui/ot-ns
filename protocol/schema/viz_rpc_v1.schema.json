@@ -51,7 +51,8 @@
         "parent_id": { "type": "integer", "minimum": 0 },
         "radio_range": { "type": "number", "minimum": 0 },
         "failed": { "type": "boolean" },
-        "kind": { "type": "string", "enum": ["inproc", "external"] }
+        "kind": { "type": "string", "enum": ["inproc", "external"] },
+        "label": { "type": "string", "maxLength": 32 }
       }
     },
     "LinkState": {

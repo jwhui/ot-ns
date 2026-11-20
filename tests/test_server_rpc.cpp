@@ -30,8 +30,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
@@ -40,8 +42,10 @@
 #include <vector>
 
 #include "cli/repl.hpp"
+#include "core/path_security.hpp"
 #include "core/simulation.hpp"
 #include "doctest/doctest.h"
+#include "nodes/rfsim_server.hpp"
 #include "server/replay.hpp"
 #include "server/rpc_handler.hpp"
 #include "server/sha1_base64.hpp"
@@ -462,3 +466,211 @@ TEST_CASE("WsServer enforces Origin check on 0.0.0.0 bind and owner-only Unix so
 
     CHECK(resp.find("403 Forbidden") != std::string::npos);
 }
+
+TEST_CASE("Executable allowlist security and node label sanitization")
+{
+    TempOutDir            outDir;
+    std::filesystem::path resolved;
+
+    CHECK(SanitizeNodeLabel("matter-light:1") == "matter-light:1");
+    CHECK(SanitizeNodeLabel("bad label; rm -rf /") == "badlabelrm-rf/");
+    CHECK(SanitizeNodeLabel(std::string(64, 'a')).size() == 32);
+
+    // Empty allowlist must always deny.
+    CHECK_FALSE(ResolveAllowedExecutable({}, "/bin/sh", resolved));
+
+    // Create a non-executable and an executable file inside outDir.
+    auto nonExec = outDir.mPath / "data.txt";
+    auto okExec  = outDir.mPath / "mock_node";
+
+    {
+        FILE *fp = std::fopen(nonExec.c_str(), "wb");
+
+        CHECK(fp != nullptr);
+        if (fp != nullptr)
+        {
+            std::fputs("hello\n", fp);
+            std::fclose(fp);
+        }
+        (void)::chmod(nonExec.c_str(), 0644);
+    }
+    {
+        FILE *fp = std::fopen(okExec.c_str(), "wb");
+
+        CHECK(fp != nullptr);
+        if (fp != nullptr)
+        {
+            std::fputs("#!/bin/sh\n", fp);
+            std::fclose(fp);
+        }
+        (void)::chmod(okExec.c_str(), 0755);
+    }
+
+    std::vector<std::filesystem::path> allowDir = {outDir.mPath};
+
+    CHECK_FALSE(ResolveAllowedExecutable(allowDir, nonExec.string(), resolved));
+    CHECK_FALSE(ResolveAllowedExecutable(allowDir, "/bin/sh", resolved));
+    CHECK_FALSE(ResolveAllowedExecutable(allowDir, (outDir.mPath / "../etc/passwd").string(), resolved));
+    CHECK_FALSE(ResolveAllowedExecutable(allowDir, outDir.mPath.string(), resolved));
+
+    CHECK(ResolveAllowedExecutable(allowDir, okExec.string(), resolved));
+    CHECK(resolved == std::filesystem::canonical(okExec));
+
+    // Exact file allowlist permits only that file.
+    std::vector<std::filesystem::path> allowFile = {okExec};
+
+    CHECK(ResolveAllowedExecutable(allowFile, okExec.string(), resolved));
+    CHECK_FALSE(ResolveAllowedExecutable(allowFile, "/bin/sh", resolved));
+}
+
+#ifdef OTNS_RFSIM_CLI_BIN
+TEST_CASE("node.spawn RPC and REPL enforce allowlist and launch labeled external nodes")
+{
+    TempOutDir               outDir;
+    Simulation               sim;
+    WsServer                 server;
+    JsonlRecorder            recorder;
+    otns::Nodes::RfSimServer rfsimServer(sim);
+    auto                     rfsimSock = outDir.mPath / "rfsim.sock";
+    auto                     rpcSock   = outDir.mPath / "rpc.sock";
+
+    CHECK(server.ListenHttp(0, "127.0.0.1"));
+    CHECK(server.ListenRpcUnix(rpcSock.string()));
+    CHECK(rfsimServer.ListenUnix(rfsimSock.string()));
+
+    VizPublisher viz(sim, server, &recorder);
+    RpcHandler   rpc(sim, server, viz, recorder, outDir.mPath, &rfsimServer);
+    Repl         repl(sim, viz, rpc, recorder, outDir.mPath);
+
+    server.SetOnMessage([&](ClientId aId, const std::string &aMsg) { rpc.HandleMessage(aId, aMsg); });
+
+    // 1. REPL rejects spawn before --allow-spawn is configured.
+    std::ostringstream oss;
+
+    CHECK(repl.ExecuteLine(std::string("spawn ") + OTNS_RFSIM_CLI_BIN, oss));
+    CHECK(oss.str().find("Error:") != std::string::npos);
+
+    // 2. Allowlist the ot-rfsim executable directory and verify REPL + RPC spawning & denial.
+    std::filesystem::path cliBin(OTNS_RFSIM_CLI_BIN);
+
+    rpc.AddAllowedSpawnPath(cliBin.parent_path());
+
+    oss.str("");
+    CHECK(repl.ExecuteLine("spawn /bin/sh", oss));
+    CHECK(oss.str().find("Error:") != std::string::npos);
+
+    oss.str("");
+    CHECK(repl.ExecuteLine(std::string("spawn ") + OTNS_RFSIM_CLI_BIN + " matter matter-repl 10 20", oss));
+    CHECK(oss.str().find("Done") != std::string::npos);
+
+    auto replSnap = sim.GetNodeSnapshot(1);
+
+    CHECK(replSnap.has_value());
+    if (replSnap.has_value())
+    {
+        CHECK(replSnap->mKind == NodeKind::kExternal);
+        CHECK(replSnap->mLabel == "matter-repl");
+    }
+
+    // 3. Verify JSON-RPC node.spawn rejection (/bin/sh) and success (matter-rpc) over Unix RPC socket.
+    bool rpcOk      = false;
+    bool sawForbid  = false;
+    bool sawSpawned = false;
+
+    std::thread rpcClient([&](void) {
+        int                fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un addr;
+
+        if (fd < 0)
+        {
+            return;
+        }
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        std::memcpy(addr.sun_path, rpcSock.c_str(), rpcSock.string().size() + 1);
+        if (::connect(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0)
+        {
+            ::close(fd);
+            return;
+        }
+
+        auto sendLine = [&](const std::string &aLine) {
+            std::string wire = aLine + "\n";
+
+            (void)::send(fd, wire.data(), wire.size(), 0);
+        };
+
+        std::string buf;
+        auto        recvLine = [&](std::string &aOut) -> bool {
+            while (buf.find('\n') == std::string::npos)
+            {
+                char    tmp[1024];
+                ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+
+                if (n <= 0)
+                {
+                    return false;
+                }
+                buf.append(tmp, static_cast<size_t>(n));
+            }
+            size_t nl = buf.find('\n');
+
+            aOut = buf.substr(0, nl);
+            buf.erase(0, nl + 1);
+            return true;
+        };
+
+        sendLine(R"({"v":1,"type":"rpc.req","id":1,"method":"node.spawn","params":{"executable":"/bin/sh"}})");
+        std::string line;
+
+        if (recvLine(line))
+        {
+            auto j = nlohmann::json::parse(line, nullptr, false);
+
+            if (j.contains("error") && j["error"]["code"] == "FORBIDDEN_EXECUTABLE")
+            {
+                sawForbid = true;
+            }
+        }
+
+        nlohmann::json spawnReq = {
+            {"v", 1},
+            {"type", "rpc.req"},
+            {"id", 2},
+            {"method", "node.spawn"},
+            {"params",
+             {
+                 {"executable", OTNS_RFSIM_CLI_BIN},
+                 {"arg_style", "matter"},
+                 {"label", "matter-rpc"},
+                 {"x", 30.0},
+                 {"y", 40.0},
+             }},
+        };
+
+        sendLine(spawnReq.dump());
+        if (recvLine(line))
+        {
+            auto j = nlohmann::json::parse(line, nullptr, false);
+
+            if (j.contains("result") && j["result"]["kind"] == "external" && j["result"]["label"] == "matter-rpc")
+            {
+                sawSpawned = true;
+            }
+        }
+
+        rpcOk = sawForbid && sawSpawned;
+        ::close(fd);
+    });
+
+    for (int i = 0; i < 120 && !rpcOk; ++i)
+    {
+        server.PollOnce(25);
+    }
+    rpcClient.join();
+
+    CHECK(sawForbid);
+    CHECK(sawSpawned);
+    CHECK(sim.GetStats().mTotal == 2);
+}
+#endif

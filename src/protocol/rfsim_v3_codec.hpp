@@ -73,6 +73,8 @@ enum class MsgType : uint16_t
     kTrelPacket    = 0x0040,
     kInfraIfPacket = 0x0041,
     kHostSocket    = 0x0042,
+    kTrelPeer      = 0x0043,
+    kInfraIfState  = 0x0044,
 };
 
 enum class TlvType : uint16_t

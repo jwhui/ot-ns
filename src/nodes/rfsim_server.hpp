@@ -45,6 +45,13 @@ class Simulation;
 
 namespace Nodes {
 
+enum class SpawnArgStyle : uint8_t
+{
+    kOtns   = 0, // Passes --endpoint <uri> --node-id <id> [--label <lbl>] + extra args
+    kMatter = 1, // Passes --thread-args=<id> --thread-args=<sock> [--thread-args=<seed>] + extra args
+    kRaw    = 2, // Passes extra args directly with {endpoint}, {socket}, {node_id}, {seed} substitution
+};
+
 /**
  * POSIX poll()-based ot-rfsim v3 socket listener supporting both Unix domain
  * sockets (AF_UNIX) and TCP sockets (default loopback 127.0.0.1).
@@ -79,7 +86,8 @@ public:
     Rf::NodeId SpawnExternalNode(const std::string              &aExecutable,
                                  const Core::NodeConfig         &aConfig,
                                  const std::vector<std::string> &aExtraArgs = {},
-                                 int                             aTimeoutMs = 5000);
+                                 int                             aTimeoutMs = 5000,
+                                 SpawnArgStyle                   aArgStyle  = SpawnArgStyle::kOtns);
 
 private:
     Rf::NodeId HandshakeAndRegister(int aClientFd, const Core::NodeConfig &aConfig, pid_t aChildPid, int aTimeoutMs);

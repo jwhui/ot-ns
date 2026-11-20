@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import math
 import os
+import select
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.request
@@ -224,6 +226,214 @@ class TestOtnsV3Sdk(unittest.TestCase):
             finally:
                 ext.terminate()
                 ext.wait(timeout=5.0)
+
+    def test_real_posix_host_over_ot_rcp_rfsim(self) -> None:
+        otns_bin = find_otns_bin()
+        rcp_bin = otns_bin.parent / "ot-rfsim" / "ot-rcp-rfsim"
+        posix_cli_env = os.environ.get("OT_POSIX_CLI_BIN")
+        if not posix_cli_env or not Path(posix_cli_env).is_file():
+            self.skipTest("Set OT_POSIX_CLI_BIN to a built OpenThread POSIX ot-cli binary to run RCP host test")
+        if not rcp_bin.is_file():
+            self.skipTest(f"External ot-rcp-rfsim binary not found at {rcp_bin}")
+
+        def read_until(fd: int, buf: list[str], predicate, timeout: float = 5.0) -> str:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                cur = buf[0]
+                if predicate(cur):
+                    buf[0] = ""
+                    return cur
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    buf[0] += chunk.decode("utf-8", errors="replace")
+            cur = buf[0]
+            buf[0] = ""
+            return cur
+
+        def run_posix_cmd(proc: subprocess.Popen[bytes], buf: list[str], cmd: str) -> list[str]:
+            assert proc.stdin is not None and proc.stdout is not None
+            proc.stdin.write((cmd + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            raw = read_until(
+                proc.stdout.fileno(),
+                buf,
+                lambda s: "Done\r\n" in s or "Done\n" in s or "Error " in s,
+                timeout=5.0,
+            )
+            lines: list[str] = []
+            for ln in raw.splitlines():
+                s = ln.strip()
+                while s.startswith(">"):
+                    s = s[1:].strip()
+                if s and s != "Done":
+                    lines.append(s)
+            return lines
+
+        with tempfile.TemporaryDirectory(prefix="otns_rcp_host_") as td:
+            sess = OtnsSession(otns_bin, seed=101, rf_model="Ideal", speed=0.0, enable_rfsim=True, output_dir=td)
+            with sess as cli:
+                assert sess.rfsim_socket_path is not None
+                n1 = cli.add_router(x=0.0, y=0.0, radio_range=160.0)
+                cli.go(seconds=10.0)
+                dataset_hex = first_non_empty_line(cli.cli(n1, "dataset active -x"))
+                n1_mleid = first_non_empty_line(cli.cli(n1, "ipaddr mleid"))
+                self.assertTrue(dataset_hex)
+                self.assertIn(":", n1_mleid)
+
+                cli.set_speed(1.0)
+                cli.resume()
+
+                radio_url = (
+                    f"spinel+hdlc+forkpty://{rcp_bin}"
+                    f"?forkpty-arg=--socket&forkpty-arg={sess.rfsim_socket_path}"
+                    f"&forkpty-arg=--node-id&forkpty-arg=2"
+                )
+                data_dir = Path(td) / "posix_data"
+                data_dir.mkdir()
+                posix = subprocess.Popen(
+                    [posix_cli_env, "--data-path", str(data_dir), radio_url],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                )
+                try:
+                    deadline = time.monotonic() + 8.0
+                    while time.monotonic() < deadline:
+                        if any(n.node_id == 2 and n.kind == "external" for n in cli.nodes()):
+                            break
+                        time.sleep(0.05)
+
+                    nodes = {n.node_id: n for n in cli.nodes()}
+                    self.assertIn(2, nodes)
+                    self.assertEqual(nodes[2].kind, "external")
+                    self.assertEqual(nodes[2].label, "rcp")
+                    cli.move_node(2, 40.0, 0.0)
+
+                    buf = [""]
+                    rcp_ver = run_posix_cmd(posix, buf, "rcp version")
+                    self.assertTrue(any("OPENTHREAD/" in l for l in rcp_ver), rcp_ver)
+
+                    run_posix_cmd(posix, buf, f"dataset set active {dataset_hex}")
+                    run_posix_cmd(posix, buf, "ifconfig up")
+                    run_posix_cmd(posix, buf, "thread start")
+
+                    state = ""
+                    deadline = time.monotonic() + 15.0
+                    while time.monotonic() < deadline:
+                        vals = run_posix_cmd(posix, buf, "state")
+                        state = vals[0] if vals else ""
+                        if state in ("child", "router"):
+                            break
+                        time.sleep(0.4)
+                    self.assertIn(state, ("child", "router"))
+
+                    mleid2 = [l for l in run_posix_cmd(posix, buf, "ipaddr mleid") if ":" in l][0]
+
+                    assert posix.stdin is not None and posix.stdout is not None
+                    posix.stdin.write(f"ping {n1_mleid}\n".encode("utf-8"))
+                    posix.stdin.flush()
+                    ping_raw = read_until(posix.stdout.fileno(), buf, lambda s: "packets received" in s, timeout=5.0)
+                    self.assertIn("1 packets transmitted, 1 packets received", ping_raw)
+
+                    cli.cli(n1, f"ping {mleid2}")
+                    time.sleep(1.5)
+                    self.assertIn("1 packets transmitted, 1 packets received", cli.take_cli_output(n1))
+                finally:
+                    posix.terminate()
+                    try:
+                        posix.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        posix.kill()
+                        posix.wait()
+                    if posix.stdin is not None:
+                        posix.stdin.close()
+                    if posix.stdout is not None:
+                        posix.stdout.close()
+
+    def test_spawn_node_rpc_allowlist_and_matter_arg_style(self) -> None:
+        otns_bin = find_otns_bin()
+        rfsim_bin = otns_bin.parent / "ot-rfsim" / "ot-cli-ftd-rfsim"
+        if not rfsim_bin.is_file():
+            self.skipTest(f"External ot-rfsim binary not found at {rfsim_bin}")
+
+        # 1. Without allow_spawn, node.spawn must be rejected with SPAWN_DISABLED.
+        with OtnsSession(otns_bin, seed=77, rf_model="Ideal", speed=0.0, enable_rfsim=True) as cli:
+            self.assertFalse(cli.info().spawn_enabled)
+            with self.assertRaises(OtnsRpcError) as ctx:
+                cli.spawn_node(rfsim_bin)
+            self.assertEqual(ctx.exception.code, "SPAWN_DISABLED")
+
+        # 2. With allow_spawn scoped to ot-rfsim/, /bin/sh is denied while ot-cli-ftd-rfsim spawns cleanly.
+        with OtnsSession(
+            otns_bin,
+            seed=78,
+            rf_model="Ideal",
+            speed=0.0,
+            allow_spawn=[rfsim_bin.parent],
+        ) as cli:
+            info = cli.info()
+            self.assertTrue(info.spawn_enabled)
+            self.assertTrue(info.rfsim_endpoint)
+
+            with self.assertRaises(OtnsRpcError) as ctx:
+                cli.spawn_node("/bin/sh")
+            self.assertEqual(ctx.exception.code, "FORBIDDEN_EXECUTABLE")
+
+            leader = cli.add_router(x=0.0, y=0.0, radio_range=160.0, label="br")
+            cli.go(seconds=10.0)
+            dataset_hex = first_non_empty_line(cli.cli(leader, "dataset active -x"))
+            self.assertTrue(dataset_hex)
+
+            # Spawn one node in native otns style and one in Matter --thread-args style.
+            n_otns = cli.spawn_node(
+                rfsim_bin,
+                node_type="med",
+                x=40.0,
+                y=0.0,
+                arg_style="otns",
+                label="matter-switch",
+            )
+            n_matter = cli.spawn_node(
+                rfsim_bin,
+                node_type="med",
+                x=-40.0,
+                y=0.0,
+                arg_style="matter",
+                auto_start=False,
+                label="matter-light",
+            )
+
+            cli.cli(n_matter, f"dataset set active {dataset_hex}")
+            cli.cli(n_matter, "mode rn")
+            cli.cli(n_matter, "ifconfig up")
+            cli.cli(n_matter, "thread start")
+            cli.go(seconds=18.0)
+
+            nodes = {n.node_id: n for n in cli.nodes()}
+            self.assertEqual(nodes[leader].label, "br")
+            self.assertEqual(nodes[n_otns].kind, "external")
+            self.assertEqual(nodes[n_otns].label, "matter-switch")
+            self.assertEqual(nodes[n_matter].kind, "external")
+            self.assertEqual(nodes[n_matter].label, "matter-light")
+
+            st = cli.stats()
+            self.assertEqual(st.total, 3)
+            self.assertEqual(st.leaders, 1)
+            self.assertEqual(st.partitions, 1)
+            self.assertEqual(st.detached, 0)
+
+            light_mleid = first_non_empty_line(cli.cli(n_matter, "ipaddr mleid"))
+            cli.cli(leader, f"ping {light_mleid}")
+            cli.go(seconds=2.0)
+            self.assertIn("1 packets transmitted, 1 packets received", cli.take_cli_output(leader))
+
+            cli.remove_node(n_matter)
+            cli.remove_node(n_otns)
+            self.assertEqual(cli.stats().total, 1)
 
 
 if __name__ == "__main__":

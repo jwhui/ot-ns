@@ -130,6 +130,9 @@ int main(int aArgc, char *aArgv[])
 #endif
 
     otRfSimAttachInstance(instance);
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+    (void)otRfSimInitInfraIf(instance, 1);
+#endif
 
     if (!otRfSimCompleteStartup(instance))
     {

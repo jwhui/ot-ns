@@ -29,6 +29,7 @@
 #include "nodes/rfsim_server.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -39,12 +40,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 
+#include "core/path_security.hpp"
 #include "core/simulation.hpp"
 #include "nodes/rfsim_node.hpp"
 #include "protocol/rfsim_v3_codec.hpp"
@@ -179,6 +182,35 @@ void KillAndReap(pid_t aPid)
     (void)::waitpid(aPid, &status, 0);
 }
 
+void SetCloseOnExec(int aFd)
+{
+    if (aFd >= 0)
+    {
+        int flags = ::fcntl(aFd, F_GETFD, 0);
+
+        if (flags >= 0)
+        {
+            (void)::fcntl(aFd, F_SETFD, flags | FD_CLOEXEC);
+        }
+    }
+}
+
+void ReplaceAll(std::string &aStr, const std::string &aFrom, const std::string &aTo)
+{
+    if (aFrom.empty())
+    {
+        return;
+    }
+
+    size_t pos = 0;
+
+    while ((pos = aStr.find(aFrom, pos)) != std::string::npos)
+    {
+        aStr.replace(pos, aFrom.size(), aTo);
+        pos += aTo.size();
+    }
+}
+
 } // namespace
 
 RfSimServer::RfSimServer(Core::Simulation &aSim)
@@ -227,6 +259,7 @@ bool RfSimServer::ListenUnix(const std::string &aSocketPath)
         return false;
     }
 
+    SetCloseOnExec(fd);
     mListenFd = fd;
     mUnixPath = aSocketPath;
     mTcpPort  = 0;
@@ -275,6 +308,7 @@ bool RfSimServer::ListenTcp(uint16_t aPort, const std::string &aBindAddr)
         return false;
     }
 
+    SetCloseOnExec(fd);
     mListenFd = fd;
     mTcpPort  = ntohs(addr.sin_port);
     mUnixPath.clear();
@@ -326,6 +360,7 @@ Rf::NodeId RfSimServer::AcceptExternalNode(const Core::NodeConfig &aConfig, int 
         return Rf::kInvalidNodeId;
     }
 
+    SetCloseOnExec(clientFd);
     if (mTcpPort > 0)
     {
         int one = 1;
@@ -341,25 +376,63 @@ Rf::NodeId RfSimServer::AcceptExternalNode(const Core::NodeConfig &aConfig, int 
 Rf::NodeId RfSimServer::SpawnExternalNode(const std::string              &aExecutable,
                                           const Core::NodeConfig         &aConfig,
                                           const std::vector<std::string> &aExtraArgs,
-                                          int                             aTimeoutMs)
+                                          int                             aTimeoutMs,
+                                          SpawnArgStyle                   aArgStyle)
 {
     if (mListenFd < 0 || aExecutable.empty())
     {
         return Rf::kInvalidNodeId;
     }
 
-    Rf::NodeId assignedId = mSim.AllocateNodeId();
-
+    Rf::NodeId               assignedId = mSim.AllocateNodeId();
+    uint64_t                 spawnSeed  = mSim.GetPlatformPrng().NextU64();
+    std::string              sockOrEp   = mUnixPath.empty() ? mEndpoint : mUnixPath;
+    std::string              cleanLabel = Core::SanitizeNodeLabel(aConfig.mLabel);
     std::vector<std::string> args;
 
     args.push_back(aExecutable);
-    args.push_back("--endpoint");
-    args.push_back(mEndpoint);
-    args.push_back("--node-id");
-    args.push_back(std::to_string(assignedId));
-    for (const auto &extra : aExtraArgs)
+
+    if (aArgStyle == SpawnArgStyle::kOtns)
     {
-        args.push_back(extra);
+        args.push_back("--endpoint");
+        args.push_back(mEndpoint);
+        args.push_back("--node-id");
+        args.push_back(std::to_string(assignedId));
+        if (!cleanLabel.empty())
+        {
+            args.push_back("--label");
+            args.push_back(cleanLabel);
+        }
+        for (const auto &extra : aExtraArgs)
+        {
+            args.push_back(extra);
+        }
+    }
+    else if (aArgStyle == SpawnArgStyle::kMatter)
+    {
+        args.push_back("--thread-args=" + std::to_string(assignedId));
+        args.push_back("--thread-args=" + sockOrEp);
+        args.push_back("--thread-args=" + std::to_string(spawnSeed));
+        for (const auto &extra : aExtraArgs)
+        {
+            args.push_back(extra);
+        }
+    }
+    else
+    {
+        std::string idStr   = std::to_string(assignedId);
+        std::string seedStr = std::to_string(spawnSeed);
+
+        for (const auto &extra : aExtraArgs)
+        {
+            std::string expanded = extra;
+
+            ReplaceAll(expanded, "{endpoint}", mEndpoint);
+            ReplaceAll(expanded, "{socket}", sockOrEp);
+            ReplaceAll(expanded, "{node_id}", idStr);
+            ReplaceAll(expanded, "{seed}", seedStr);
+            args.push_back(std::move(expanded));
+        }
     }
 
     std::vector<char *> argv;
@@ -380,8 +453,31 @@ Rf::NodeId RfSimServer::SpawnExternalNode(const std::string              &aExecu
 
     if (pid == 0)
     {
-        // Child process: close listening fd before execv.
-        ::close(mListenFd);
+        // Child process: detach stdio to /dev/null and close inherited descriptors before execv.
+        int devNull = ::open("/dev/null", O_RDWR);
+
+        if (devNull >= 0)
+        {
+            (void)::dup2(devNull, STDIN_FILENO);
+            (void)::dup2(devNull, STDOUT_FILENO);
+            (void)::dup2(devNull, STDERR_FILENO);
+            if (devNull > STDERR_FILENO)
+            {
+                ::close(devNull);
+            }
+        }
+
+        long maxFd = ::sysconf(_SC_OPEN_MAX);
+
+        if (maxFd <= 0 || maxFd > 4096)
+        {
+            maxFd = 4096;
+        }
+        for (int fd = 3; fd < static_cast<int>(maxFd); ++fd)
+        {
+            ::close(fd);
+        }
+
         ::execv(aExecutable.c_str(), argv.data());
         ::_exit(127);
     }
@@ -408,6 +504,7 @@ Rf::NodeId RfSimServer::SpawnExternalNode(const std::string              &aExecu
         return Rf::kInvalidNodeId;
     }
 
+    SetCloseOnExec(clientFd);
     if (mTcpPort > 0)
     {
         int one = 1;
@@ -506,10 +603,26 @@ Rf::NodeId RfSimServer::HandshakeAndRegister(int                     aClientFd,
         return Rf::kInvalidNodeId;
     }
 
-    auto       node    = std::make_unique<RfSimNode>(mSim, nodeId, aConfig, aClientFd, aChildPid);
+    Core::NodeConfig effectiveCfg = aConfig;
+
+    if (effectiveCfg.mLabel.empty())
+    {
+        auto peerText = hello.GetText(Protocol::TlvType::kText);
+
+        if (peerText.has_value() && !peerText->empty() && *peerText != "ot-rfsim-v3")
+        {
+            effectiveCfg.mLabel = Core::SanitizeNodeLabel(*peerText);
+        }
+    }
+    else
+    {
+        effectiveCfg.mLabel = Core::SanitizeNodeLabel(effectiveCfg.mLabel);
+    }
+
+    auto       node    = std::make_unique<RfSimNode>(mSim, nodeId, effectiveCfg, aClientFd, aChildPid);
     RfSimNode *rawNode = node.get();
 
-    if (mSim.RegisterExternalNode(std::move(node), aConfig) == Rf::kInvalidNodeId)
+    if (mSim.RegisterExternalNode(std::move(node), effectiveCfg) == Rf::kInvalidNodeId)
     {
         return Rf::kInvalidNodeId;
     }
