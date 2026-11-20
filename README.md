@@ -1,81 +1,40 @@
-[![Ask DeepWiki][deepwiki-svg]][deepwiki]
+# OpenThread Network Simulator (OTNS v3)
 
-[deepwiki]: https://deepwiki.com/openthread/ot-ns
-[deepwiki-svg]: https://deepwiki.com/badge.svg
+> **Status**: Active ground-up v3 development on the `v3` branch. For legacy Go-based OTNS v2, see the `main` branch.
 
----
+OTNS v3 is a C++17 discrete-event Thread network simulator and visualizer designed for:
 
-# OpenThread Network Simulator
+- **High scale (200–1,000+ nodes)** via in-process multi-instance OpenThread nodes with zero IPC overhead.
+- **Heterogeneous & external nodes** (Matter Linux apps, real OTBR/RCPs, custom/legacy Thread binaries) via a versioned binary/TLV `ot-rfsim` v3 Unix/TCP socket bridge running on the same RF medium.
+- **High-fidelity RF physics** via a standalone, zero-OS-dependency C++17 RF library (`libotns_rf`) supporting `Ideal` and `MutualInterference` (3GPP/ITU path loss, shadow & time-variant fading, SINR/BER, CCA/energy scan, spatial neighbor indexing, and deterministic PRNG).
+- **Modern, low-maintenance visualization** via an embedded localhost HTTP/1.1 + WebSocket JSON server and a Vite + TypeScript + batched HTML5 Canvas 2D frontend shared with `openthread/tests/nexus` — zero Go, zero Webpack 4, zero gRPC/Protobuf/proxy chains, and zero committed generated bundles.
 
-OpenThread Network Simulator (OTNS) simulates Thread networks using OpenThread POSIX instances and provides visualization and management of those simulated networks.
+## Quick Start (Headless C++17 Build & Tests)
 
-More information about Thread can be found at [threadgroup.org](http://threadgroup.org/). Thread is a registered trademark of the Thread Group, Inc.
-
-To learn more about OpenThread, visit [openthread.io](https://openthread.io).
-
-# Features
-
-Note: this is version 2.x of OTNS. It offers additional features compared to version 1:
-
-- Support for more accurate RF simulation of OpenThread nodes. This uses the OpenThread platform `ot-rfsim`, which specifically supports RF simulation for OT nodes. This C code is included.
-- Selectable radio (RF propagation) models with tunable RF parameters.
-- Run-time tunable radio parameters on each individual OT node. For example, CSL parameters or Rx sensitivity.
-- Control of logging display from OT-node, using `log` and `watch` CLI commands. Logging to file per OT-node. The logging output can include any enabled OT-node log items.
-- Detailed logging options for RF operations (at log-level 'trace') performed in the simulated radio, at 1 us resolution.
-- Reproducible simulations by selection of a seed value for all pseudo-random number generators.
-- See packets in flight: animations in the GUI with a duration scaled to the actual time duration of a packet in flight (works at low simulation speed only).
-- Support for easily adding various Thread node types (1.1, 1.2, 1.3, 1.4, 1.4 Border Router).
-- Support for starting Thread nodes externally; with automatic connection to a running simulation.
-- New graphical displays for overall node type statistics, and energy usage (beta - contribution by [Vinggui](https://github.com/Vinggui)).
-- Extended set of Python scripts for unit testing, examples, and case studies.
-- Key Performance Indicators (KPI) module that tracks counters and statistics for all nodes.
-- Loading/saving of network topologies in YAML files.
-- Custom startup scripts with OT CLI commands, defined in a YAML file.
-- Additional ["WPAN-TAP"](https://exegin.com/wp-content/uploads/ieee802154_tap.pdf) PCAP format that captures channel information.
-- Various UI look & feel improvements.
-
-[build-actions-svg]: https://github.com/openthread/ot-ns/workflows/Build/badge.svg?branch=main&event=push
-[build-actions]: https://github.com/openthread/ot-ns/actions?query=workflow%3ABuild+branch%3Amain+event%3Apush
-[lint-actions-svg]: https://github.com/openthread/ot-ns/workflows/Lint/badge.svg?branch=main&event=push
-[lint-actions]: https://github.com/openthread/ot-ns/actions?query=workflow%3ALint+branch%3Amain+event%3Apush
-[test-actions-svg]: https://github.com/openthread/ot-ns/workflows/Test/badge.svg?branch=main&event=push
-[test-actions]: https://github.com/openthread/ot-ns/actions?query=workflow%3ATest+branch%3Amain+event%3Apush
-[codecov-svg]: https://codecov.io/gh/openthread/ot-ns/branch/main/graph/badge.svg
-[codecov-url]: https://codecov.io/gh/openthread/ot-ns
-
-# Getting started
-
-See [GUIDE](GUIDE.md) to get started with a local install of OTNS. The guide also covers basic usage and has a pointer to a tutorial.
-
-See [OTNS CLI Reference](cli/README.md) for the OTNS CLI commands.
-
-To do a quick try-out of OTNS without installing any software locally, you can fetch and run the playground Docker image:
+Prerequisites: CMake ≥ 3.20, Ninja, C++17 compiler (GCC or Clang). Headless builds require **zero Node.js**.
 
 ```bash
-docker run -it -p 8997-9000:8997-9000 openthread/otns-playground
+cmake -S . -B build -G Ninja -DOTNS_ENABLE_SANITIZERS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-The playground has some limitations: by default, any save/load operations are confined to the container's file system and will be lost when the container stops. To persist data, use Docker's -v flag to mount a volume. Additionally, the 'web' command does not work.
+## Code Style & Formatting
 
-# Contributing
+OTNS v3 follows OpenThread's host-C++ style (`openthread/STYLE_GUIDE.md` naming, Allman braces, `-fno-exceptions -fno-rtti`, matching `ot-br-posix` and `tests/nexus`) using the repository's `.clang-format` rules:
 
-We would love for you to contribute to OTNS and help make it even better than it is today! See our [Contributing Guidelines](CONTRIBUTING.md) for more information.
+```bash
+./script/make-pretty       # Format C/C++ sources in place (clang-format v19)
+./script/make-pretty check # Verify formatting without modifying files
+```
 
-Contributors are required to abide by our [Code of Conduct](CODE_OF_CONDUCT.md) and [Coding Conventions and Style Guide](CONTRIBUTING.md#coding-conventions-and-style). See [AUTHORS](AUTHORS) for the list of present authors.
+## Architecture & Specifications
 
-# Versioning
+- [Architecture RFC](docs/architecture.md)
+- [`ot-rfsim` v3 Binary/TLV Wire Protocol](docs/rfsim_v3_protocol.md)
+- [Shared Visualization & Control Protocol (OTNS + Nexus)](docs/viz_rpc_protocol.md)
+- [JSON Schema Contract](protocol/schema/viz_rpc_v1.schema.json)
 
-OTNS follows the [Semantic Versioning guidelines](http://semver.org/) for release cycle transparency and to maintain backwards compatibility.
+## License
 
-# License
-
-OTNS is released under the [BSD 3-Clause license](LICENSE). See the [`LICENSE`](LICENSE) file for more information.
-
-Please only use the OpenThread name and marks when accurately referencing this software distribution. Do not use the marks in a way that suggests you are endorsed by or otherwise affiliated with Nest, Google, or The Thread Group.
-
-# Need Help?
-
-OpenThread support is available on GitHub:
-
-- Bugs and feature requests — [submit to the Issue Tracker](https://github.com/openthread/ot-ns/issues)
-- Community Discussion - [ask questions, share ideas, and engage with other community members](https://github.com/openthread/openthread/discussions)
+OTNS is released under the [BSD 3-Clause License](LICENSE).

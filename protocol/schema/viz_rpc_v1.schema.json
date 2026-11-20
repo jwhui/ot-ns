@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openthread.io/schemas/otns/viz_rpc_v1.schema.json",
+  "title": "OTNS / Nexus Shared Visualization & Control Protocol v1",
+  "type": "object",
+  "required": ["v", "type"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": {
+      "type": "string",
+      "enum": [
+        "rpc.req",
+        "rpc.res",
+        "event.snapshot",
+        "event.batch_diff",
+        "event.packet",
+        "event.stats",
+        "event.log",
+        "event.heartbeat"
+      ]
+    },
+    "ts_us": { "type": "integer", "minimum": 0 }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/RpcRequest" },
+    { "$ref": "#/$defs/RpcResponse" },
+    { "$ref": "#/$defs/SnapshotEvent" },
+    { "$ref": "#/$defs/BatchDiffEvent" },
+    { "$ref": "#/$defs/PacketEvent" },
+    { "$ref": "#/$defs/StatsEvent" },
+    { "$ref": "#/$defs/LogEvent" },
+    { "$ref": "#/$defs/HeartbeatEvent" }
+  ],
+  "$defs": {
+    "NodeRole": {
+      "type": "string",
+      "enum": ["disabled", "detached", "child", "router", "leader", "reed", "fed", "med", "sed"]
+    },
+    "NodeState": {
+      "type": "object",
+      "required": ["id", "x", "y", "role"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number", "default": 0 },
+        "role": { "$ref": "#/$defs/NodeRole" },
+        "rloc16": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "ext_addr": { "type": "string" },
+        "partition_id": { "type": "integer", "minimum": 0 },
+        "parent_id": { "type": "integer", "minimum": 0 },
+        "radio_range": { "type": "number", "minimum": 0 },
+        "failed": { "type": "boolean" },
+        "kind": { "type": "string", "enum": ["inproc", "external"] }
+      }
+    },
+    "LinkState": {
+      "type": "object",
+      "required": ["src", "dst", "kind"],
+      "properties": {
+        "src": { "type": "integer", "minimum": 1 },
+        "dst": { "type": "integer", "minimum": 1 },
+        "kind": { "type": "string", "enum": ["parent", "router", "child", "neighbor"] },
+        "rssi_dbm": { "type": "number" },
+        "lqi": { "type": "integer", "minimum": 0, "maximum": 3 }
+      }
+    },
+    "NodeStats": {
+      "type": "object",
+      "required": ["total", "leaders", "routers", "children", "detached", "disabled", "partitions"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "leaders": { "type": "integer", "minimum": 0 },
+        "routers": { "type": "integer", "minimum": 0 },
+        "children": { "type": "integer", "minimum": 0 },
+        "sed": { "type": "integer", "minimum": 0 },
+        "detached": { "type": "integer", "minimum": 0 },
+        "disabled": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "partitions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RpcRequest": {
+      "properties": {
+        "type": { "const": "rpc.req" },
+        "id": { "type": ["integer", "string"] },
+        "method": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" }
+      },
+      "required": ["v", "type", "id", "method"]
+    },
+    "RpcResponse": {
+      "properties": {
+        "type": { "const": "rpc.res" },
+        "id": { "type": ["integer", "string", "null"] },
+        "result": {},
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" }
+          }
+        }
+      },
+      "required": ["v", "type", "id"]
+    },
+    "SnapshotEvent": {
+      "properties": {
+        "type": { "const": "event.snapshot" },
+        "ts_us": { "type": "integer", "minimum": 0 },
+        "engine": { "type": "string" },
+        "speed": { "type": "number", "minimum": 0 },
+        "paused": { "type": "boolean" },
+        "rf_model": { "type": "string" },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/NodeState" } },
+        "links": { "type": "array", "items": { "$ref": "#/$defs/LinkState" } },
+        "stats": { "$ref": "#/$defs/NodeStats" }
+      },
+      "required": ["v", "type", "ts_us", "engine", "nodes", "links"]
+    },
+    "BatchDiffEvent": {
+      "properties": {
+        "type": { "const": "event.batch_diff" },
+        "ts_us": { "type": "integer", "minimum": 0 },
+        "upsert_nodes": { "type": "array", "items": { "$ref": "#/$defs/NodeState" } },
+        "remove_nodes": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "upsert_links": { "type": "array", "items": { "$ref": "#/$defs/LinkState" } },
+        "remove_links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["src", "dst", "kind"],
+            "properties": {
+              "src": { "type": "integer", "minimum": 1 },
+              "dst": { "type": "integer", "minimum": 1 },
+              "kind": { "type": "string" }
+            }
+          }
+        }
+      },
+      "required": ["v", "type", "ts_us"]
+    },
+    "PacketEvent": {
+      "properties": {
+        "type": { "const": "event.packet" },
+        "ts_us": { "type": "integer", "minimum": 0 },
+        "src": { "type": "integer", "minimum": 1 },
+        "dst": { "type": "integer", "minimum": 0 },
+        "channel": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "duration_us": { "type": "integer", "minimum": 0 },
+        "rssi_dbm": { "type": "number" },
+        "frame_len": { "type": "integer", "minimum": 0 },
+        "protocol": { "type": "string" },
+        "summary": { "type": "string" }
+      },
+      "required": ["v", "type", "ts_us", "src", "channel"]
+    },
+    "StatsEvent": {
+      "properties": {
+        "type": { "const": "event.stats" },
+        "ts_us": { "type": "integer", "minimum": 0 },
+        "stats": { "$ref": "#/$defs/NodeStats" }
+      },
+      "required": ["v", "type", "ts_us", "stats"]
+    },
+    "LogEvent": {
+      "properties": {
+        "type": { "const": "event.log" },
+        "ts_us": { "type": "integer", "minimum": 0 },
+        "node_id": { "type": "integer", "minimum": 1 },
+        "level": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["v", "type", "ts_us", "node_id", "message"]
+    },
+    "HeartbeatEvent": {
+      "properties": {
+        "type": { "const": "event.heartbeat" },
+        "ts_us": { "type": "integer", "minimum": 0 },
+        "speed": { "type": "number", "minimum": 0 },
+        "paused": { "type": "boolean" }
+      },
+      "required": ["v", "type", "ts_us", "speed", "paused"]
+    }
+  }
+}

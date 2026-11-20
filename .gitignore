@@ -1,57 +1,27 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Build directories
+build/
+build-*/
+cmake-build-*/
 
-# Test binary, build with `go test -c`
-*.test
+# Web frontend (never commit build outputs or node_modules)
+web/node_modules/
+web/dist/
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
+# Python
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
 
-# IDE files
-.idea/
-
-# Go generated files
-go.sum
-go.mod.orig
-
-# ignore OTNS Go executables
-/cmd/otns/otns
-
-# OT-NS output files
-tmp*/
-?_kpi*.json
-*.log
-*.rep
-*.replay
-
-# Python/NodeJS generated
-*.pyc
-__pycache__
-node_modules/
-coverage.txt
-
-# Ignore any pcap (generated)
+# Simulation artifacts
 *.pcap
+*.jsonl
+*.log
+tmp/
 
-# ignore generated files (gRPC/web)
-/visualize/grpc/pb/*.pb.go
-/web/site/js/proto/*_pb.js
-/web/site/static/js/*.js
-
-# ot-rfsim build items
-/ot-rfsim/build*/
-/ot-rfsim/cmake-build-debug
-/ot-rfsim/openthread-v*/
-ot-cli-ftd*
-ot-cli-mtd*
-ot-rcp
-
-# pylibs installation files
-/pylibs/build/
-/pylibs/dist/
-/pylibs/pyOTNS.egg-info/
-/.venv-otns
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json

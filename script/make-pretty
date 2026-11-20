@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#  Copyright (c) 2019-2024, The OpenThread Authors.
+#  Copyright (c) 2026, The OTNS Authors.
 #  All rights reserved.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -28,285 +28,94 @@
 #
 
 #
-# The script to check or format source code of OTNS.
+# Format or check OTNS v3 C/C++ source files using OpenThread's .clang-format rules.
 #
-# Format go, c/c++, markdown, python, and shell:
-#
-#     script/make-pretty
-#
-# Format go only:
-#
-#     script/make-pretty go
-#
-# Format c/c++ only:
-#
-#     script/make-pretty clang
-#     script/make-pretty clang-format
-#     script/make-pretty clang-tidy
-#
-# Format markdown only:
-#
-#     script/make-pretty markdown
-#
-# Format python only:
-#
-#     script/make-pretty python
-#
-# Format shell only:
-#
-#     script/make-pretty shell
-#
-# Check only:
-#
-#     script/make-pretty check go
-#     script/make-pretty check clang
-#     script/make-pretty check clang-format
-#     script/make-pretty check clang-tidy
-#     script/make-pretty check markdown
-#     script/make-pretty check python
-#     script/make-pretty check shell
+# Usage:
+#   ./script/make-pretty               # Format all C/C++ sources in place
+#   ./script/make-pretty clang-format  # Same as above
+#   ./script/make-pretty check         # Verify formatting without modifying files
 #
 
 set -euo pipefail
 
-OT_CLANG_SOURCES=('*.c' '*.cc' '*.cpp' '*.h' '*.hpp')
-readonly OT_CLANG_SOURCES
+repo_dir=$(cd "$(dirname "$0")/.." && pwd)
+readonly repo_dir
 
-OT_MARKDOWN_SOURCES=('*.md')
-readonly OT_MARKDOWN_SOURCES
+OTNS_EXCLUDE_REGEX='^(third_party|openthread|build[^/]*|web/node_modules)/'
+readonly OTNS_EXCLUDE_REGEX
 
-OT_PYTHON_SOURCES=('*.py')
-readonly OT_PYTHON_SOURCES
-
-OT_CLANG_TIDY_FIX_DIRS=('ot-rfsim/src')
-readonly OT_CLANG_TIDY_FIX_DIRS
-
-# shellcheck source=script/common.sh
-. "$(dirname "$0")"/common.sh
-
-do_go_format()
+find_clang_format()
 {
-    echo -e '====================='
-    echo -e '     format Go'
-    echo -e '====================='
-
-    cd "$OTNSDIR" || return 1
-    golangci-lint run "${GOLINT_ARGS[@]}" --fix || die "make pretty failed"
+    if [[ -n ${CLANG_FORMAT:-} ]]; then
+        echo "${CLANG_FORMAT}"
+    elif command -v clang-format-19 >/dev/null 2>&1; then
+        echo "clang-format-19"
+    elif command -v clang-format >/dev/null 2>&1; then
+        echo "clang-format"
+    else
+        echo >&2 "ERROR: clang-format (v19 recommended) not found in PATH."
+        exit 1
+    fi
 }
 
-do_go_format_check()
+list_cxx_files()
 {
-    echo -e '====================='
-    echo -e '     check Go'
-    echo -e '====================='
-
-    cd "$OTNSDIR" || return 1
-    golangci-lint run "${GOLINT_ARGS[@]}" || die "make pretty failed"
-}
-
-do_go_mod_check()
-{
-    echo -e '====================='
-    echo -e '     check go.mod'
-    echo -e '====================='
-
-    cp go.mod go.mod.orig
-    go mod tidy
-    diff go.mod go.mod.orig || die "go.mod is not tidy"
-}
-
-do_go_mod_format()
-{
-    echo -e '====================='
-    echo -e '     format go.mod'
-    echo -e '====================='
-
-    go mod tidy
+    git -C "${repo_dir}" ls-files --cached --others --exclude-standard \
+        -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' \
+        | grep -v -E "${OTNS_EXCLUDE_REGEX}" || true
 }
 
 do_clang_format()
 {
-    get_openthread
-    echo -e '========================================'
-    echo -e '     format c/c++ (clang-format)'
-    echo -e '========================================'
+    local cf
+    cf=$(find_clang_format)
+    echo "Formatting C/C++ files with ${cf} ($("${cf}" --version))"
 
-    git ls-files "${OT_CLANG_SOURCES[@]}" | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n3 -P"$OTNS_BUILD_JOBS" openthread/script/clang-format -style=file -i -verbose
+    local files
+    files=$(list_cxx_files)
+    if [[ -z ${files} ]]; then
+        echo "No C/C++ files found."
+        return 0
+    fi
+
+    (cd "${repo_dir}" && printf '%s\n' "${files}" | xargs "${cf}" -style=file -i)
 }
 
 do_clang_format_check()
 {
-    get_openthread
-    echo -e '========================================'
-    echo -e '     check c/c++ (clang-format)'
-    echo -e '========================================'
+    local cf
+    cf=$(find_clang_format)
+    echo "Checking C/C++ formatting with ${cf} ($("${cf}" --version))"
 
-    git ls-files "${OT_CLANG_SOURCES[@]}" | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n3 -P"$OTNS_BUILD_JOBS" openthread/script/clang-format-check
-}
-
-do_clang_tidy_fix()
-{
-    get_openthread
-    echo -e '========================================'
-    echo -e '     format c/c++ (clang-tidy)'
-    echo -e '========================================'
-
-    (cd ./ot-rfsim \
-        && ./script/build_latest \
-        && cd build/latest \
-        && ../../../openthread/script/clang-tidy -j"$OTNS_BUILD_JOBS" "${OT_CLANG_TIDY_FIX_DIRS[@]}" -fix)
-}
-
-do_clang_tidy_check()
-{
-    get_openthread
-    echo -e '========================================'
-    echo -e '     check c/c++ (clang-tidy)'
-    echo -e '========================================'
-
-    (cd ./ot-rfsim \
-        && ./script/build_latest \
-        && cd build/latest \
-        && ../../../openthread/script/clang-tidy -j"$OTNS_BUILD_JOBS" "${OT_CLANG_TIDY_FIX_DIRS[@]}")
-}
-
-do_markdown_format()
-{
-    echo -e '========================================'
-    echo -e '     format markdown'
-    echo -e '========================================'
-
-    git ls-files "${OT_MARKDOWN_SOURCES[@]}" | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" npx prettier@2.0.4 --write
-}
-
-do_markdown_check()
-{
-    echo -e '========================================'
-    echo -e '     check markdown'
-    echo -e '========================================'
-
-    git ls-files "${OT_MARKDOWN_SOURCES[@]}" | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" npx prettier@2.0.4 --check
-}
-
-do_python_format()
-{
-    activate_python_venv
-    echo -e '========================================'
-    echo -e '     format python'
-    echo -e '========================================'
-
-    git ls-files "${OT_PYTHON_SOURCES[@]}" | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" python3 -m yapf --verbose --style '{based_on_style: google, column_limit: 119}' -ipr
-}
-
-do_python_check()
-{
-    activate_python_venv
-    echo -e '========================================'
-    echo -e '     check python'
-    echo -e '========================================'
-
-    git ls-files "${OT_PYTHON_SOURCES[@]}" | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" python3 -m yapf --verbose --style '{based_on_style: google, column_limit: 119}' -dpr
-}
-
-do_shell_format()
-{
-    echo -e '========================================'
-    echo -e '     format shell'
-    echo -e '========================================'
-
-    git ls-files | xargs shfmt -f | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" shfmt -i 4 -bn -ci -fn -s -w
-}
-
-do_shell_check()
-{
-    echo -e '========================================'
-    echo -e '     check shell'
-    echo -e '========================================'
-
-    git ls-files | xargs shfmt -f | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" shfmt -i 4 -bn -ci -fn -s -d
-
-    git ls-files | xargs shfmt -f | grep -v -E "^($(echo "${OTNS_EXCLUDE_DIRS[@]}" | tr ' ' '|'))" \
-        | xargs -n10 -P"$OTNS_BUILD_JOBS" shellcheck -x
-}
-
-do_check()
-{
-    if [ $# == 0 ]; then
-        do_go_format_check
-        do_go_mod_check
-        do_clang_format_check
-        do_clang_tidy_check
-        do_markdown_check
-        do_python_check
-        do_shell_check
-    elif [ "$1" == 'go' ]; then
-        do_go_format_check
-        do_go_mod_check
-    elif [ "$1" == 'clang' ]; then
-        do_clang_format_check
-        do_clang_tidy_check
-    elif [ "$1" == 'clang-format' ]; then
-        do_clang_format_check
-    elif [ "$1" == 'clang-tidy' ]; then
-        do_clang_tidy_check
-    elif [ "$1" == 'markdown' ]; then
-        do_markdown_check
-    elif [ "$1" == 'python' ]; then
-        do_python_check
-    elif [ "$1" == 'shell' ]; then
-        do_shell_check
-    else
-        echo >&2 "Unsupported check: $1. Supported: go, clang, clang-format, clang-tidy, markdown, python, shell"
-        # 128 for Invalid arguments
-        exit 128
+    local files
+    files=$(list_cxx_files)
+    if [[ -z ${files} ]]; then
+        echo "No C/C++ files found."
+        return 0
     fi
+
+    (cd "${repo_dir}" && printf '%s\n' "${files}" | xargs "${cf}" -style=file --dry-run --Werror)
+    echo "All C/C++ files match OpenThread formatting."
 }
 
 main()
 {
-    install_pretty_tools
-
-    if [ $# == 0 ]; then
-        do_go_format
-        do_go_mod_format
-        do_clang_tidy_fix
+    if [[ $# -eq 0 ]]; then
         do_clang_format
-        do_markdown_format
-        do_python_format
-        do_shell_format
-    elif [ "$1" == 'go' ]; then
-        do_go_format
-        do_go_mod_format
-    elif [ "$1" == 'clang' ]; then
-        do_clang_tidy_fix
+    elif [[ $1 == 'clang' || $1 == 'clang-format' ]]; then
         do_clang_format
-    elif [ "$1" == 'clang-format' ]; then
-        do_clang_format
-    elif [ "$1" == 'clang-tidy' ]; then
-        do_clang_tidy_fix
-    elif [ "$1" == 'markdown' ]; then
-        do_markdown_format
-    elif [ "$1" == 'python' ]; then
-        do_python_format
-    elif [ "$1" == 'shell' ]; then
-        do_shell_format
-    elif [ "$1" == 'check' ]; then
+    elif [[ $1 == 'check' ]]; then
         shift
-        do_check "$@"
+        if [[ $# -eq 0 || $1 == 'clang' || $1 == 'clang-format' ]]; then
+            do_clang_format_check
+        else
+            echo >&2 "Unsupported check: $1. Supported: clang, clang-format"
+            exit 128
+        fi
     else
-        echo >&2 "Unsupported action: $1. Supported: go, clang, clang-format, clang-tidy, markdown, python, shell, check"
-        # 128 for Invalid arguments
+        echo >&2 "Unsupported action: $1. Supported: clang, clang-format, check"
         exit 128
     fi
-
 }
 
 main "$@"

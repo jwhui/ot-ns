@@ -1,0 +1,199 @@
+/*
+ *  Copyright (c) 2026, The OTNS Authors.
+ *  All rights reserved.
+ *
+ *  Redistribution and use in source and binary forms, with or without
+ *  modification, are permitted provided that the following conditions are met:
+ *  1. Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *  2. Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *  3. Neither the name of the copyright holder nor the
+ *     names of its contributors may be used to endorse or promote products
+ *     derived from this software without specific prior written permission.
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ *  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ *  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ *  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ *  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ *  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ *  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ *  POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef OTNS_NODES_INPROC_NODE_HPP_
+#define OTNS_NODES_INPROC_NODE_HPP_
+
+#include <openthread/cli.h>
+#include <openthread/instance.h>
+#include <openthread/platform/radio.h>
+
+#include <array>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "mac_frame.h"
+#include "core/scheduler.hpp"
+#include "core/sim_node.hpp"
+
+namespace otns {
+namespace Core {
+class Simulation;
+} // namespace Core
+
+namespace Nodes {
+
+/**
+ * Multi-instance in-process OpenThread node host using OpenThread's public C APIs.
+ * Scales cleanly to 500-1000+ nodes in a single process with zero IPC/FD overhead.
+ */
+class InProcNode final : public Core::SimNode
+{
+public:
+    InProcNode(Core::Simulation &aSim, Rf::NodeId aId, const Core::NodeConfig &aConfig);
+    ~InProcNode(void) override;
+
+    InProcNode(const InProcNode &)            = delete;
+    InProcNode &operator=(const InProcNode &) = delete;
+
+    // SimNode overrides
+    Rf::NodeId     GetId(void) const override { return mId; }
+    Core::NodeKind GetKind(void) const override { return Core::NodeKind::kInProc; }
+    Rf::Position3D GetPosition(void) const override { return mPos; }
+    void           SetPosition(Rf::Position3D aPos) override { mPos = aPos; }
+
+    bool IsEnabled(void) const override { return mEnabled; }
+    void SetEnabled(bool aEnabled) override;
+
+    bool HasPendingTasklets(void) const override { return mHasPendingTasklets; }
+    void ProcessTasklets(void) override;
+
+    std::string        ExecuteCli(const std::string &aCommand) override;
+    std::string        TakeCliOutput(void) override;
+    Core::NodeSnapshot GetSnapshot(void) const override;
+
+    bool OnRadioRxDone(const Core::RawFrame &aRxFrame, Core::RawFrame &aAckOut) override;
+
+    // Platform dispatch helpers (called from inproc_platform.cpp)
+    static InProcNode *FromInstance(otInstance *aInstance);
+
+    Core::Simulation &GetSim(void) { return mSim; }
+    otInstance       *GetOtInstance(void) { return mOtInstance; }
+
+    // Tasklets & Alarms
+    void SignalPendingTasklets(void);
+    void StartAlarmMilliAt(uint32_t aT0Ms, uint32_t aDtMs);
+    void StopAlarmMilli(void);
+    void StartAlarmMicroAt(uint32_t aT0Us, uint32_t aDtUs);
+    void StopAlarmMicro(void);
+
+    // Radio platform methods
+    otRadioState  RadioGetState(void) const { return mRadioState; }
+    otError       RadioEnable(void);
+    otError       RadioDisable(void);
+    otError       RadioSleep(void);
+    otError       RadioReceive(uint8_t aChannel);
+    otRadioFrame *RadioGetTxBuffer(void) { return &mTxFrame; }
+    otError       RadioTransmit(otRadioFrame *aFrame);
+    otError       RadioEnergyScan(uint8_t aChannel, uint16_t aDurationMs);
+
+    void SetPanId(otPanId aPanId) { mPanId = aPanId; }
+    void SetShortAddress(otShortAddress aAddr) { mRadioCtx.mShortAddress = aAddr; }
+    void SetAltShortAddress(otShortAddress aAddr) { mRadioCtx.mAlternateShortAddress = aAddr; }
+    void SetExtendedAddress(const otExtAddress *aExtAddr);
+    bool GetPromiscuous(void) const { return mPromiscuous; }
+    void SetPromiscuous(bool aEnable) { mPromiscuous = aEnable; }
+
+    int8_t GetTxPower(void) const { return mTxPowerDbm; }
+    void   SetTxPower(int8_t aPowerDbm);
+    int8_t GetRxSensitivity(void) const { return mRxSensitivityDbm; }
+    int8_t GetCcaThreshold(void) const { return mCcaThresholdDbm; }
+    void   SetCcaThreshold(int8_t aThresholdDbm) { mCcaThresholdDbm = aThresholdDbm; }
+
+    void    EnableSrcMatch(bool aEnable) { mSrcMatchEnabled = aEnable; }
+    otError AddSrcMatchShort(otShortAddress aAddr);
+    otError AddSrcMatchExt(const otExtAddress *aAddr);
+    otError ClearSrcMatchShort(otShortAddress aAddr);
+    otError ClearSrcMatchExt(const otExtAddress *aAddr);
+    void    ClearAllSrcMatchShort(void) { mSrcMatchShort.clear(); }
+    void    ClearAllSrcMatchExt(void) { mSrcMatchExt.clear(); }
+
+    void SetMacKey(uint8_t                 aKeyIdMode,
+                   uint8_t                 aKeyIndex,
+                   const otMacKeyMaterial *aPrevKey,
+                   const otMacKeyMaterial *aCurrKey,
+                   const otMacKeyMaterial *aNextKey,
+                   otRadioKeyType          aKeyType);
+    void SetMacFrameCounter(uint32_t aCounter);
+    void SetMacFrameCounterIfLarger(uint32_t aCounter);
+
+    void SetCslParams(uint32_t aPeriod, otShortAddress aShortAddr, const otExtAddress *aExtAddr);
+    void UpdateCslSampleTime(uint32_t aSampleTimeUs) { mRadioCtx.mCslSampleTime = aSampleTimeUs; }
+
+    // Settings platform methods (in-memory per-node key/value store)
+    otError SettingsGet(uint16_t aKey, int aIndex, uint8_t *aValue, uint16_t *aValueLen) const;
+    otError SettingsSet(uint16_t aKey, const uint8_t *aValue, uint16_t aValueLen);
+    otError SettingsAdd(uint16_t aKey, const uint8_t *aValue, uint16_t aValueLen);
+    otError SettingsDelete(uint16_t aKey, int aIndex);
+    void    SettingsWipe(void) { mSettings.clear(); }
+
+    void                            AppendLog(otLogLevel aLevel, const char *aLine);
+    const std::vector<std::string> &GetLogs(void) const { return mLogs; }
+
+private:
+    static int HandleCliOutput(void *aContext, const char *aFormat, va_list aArgs);
+    bool       HasFramePendingFor(const otMacAddress &aSrcAddr) const;
+    void       ConfigureInitialDataset(const Core::NodeConfig &aConfig);
+
+    Core::Simulation     &mSim;
+    Rf::NodeId            mId                 = Rf::kInvalidNodeId;
+    Rf::Position3D        mPos                = {};
+    double                mRadioRange         = Rf::kDefaultRadioRange;
+    bool                  mEnabled            = true;
+    bool                  mHasPendingTasklets = false;
+    std::shared_ptr<bool> mAliveFlag;
+
+    // OpenThread multi-instance buffers & handles
+    std::vector<uint8_t> mInstanceBuf;
+    otInstance          *mOtInstance = nullptr;
+    std::vector<uint8_t> mCliBuf;
+    otCliInterpreter    *mCliInterp = nullptr;
+    std::string          mCliOutput;
+
+    // Scheduled alarm handles
+    Core::EventId mAlarmMilliId = Core::kInvalidEventId;
+    Core::EventId mAlarmMicroId = Core::kInvalidEventId;
+
+    // Radio state & buffers
+    otRadioState                                 mRadioState       = OT_RADIO_STATE_DISABLED;
+    uint8_t                                      mChannel          = 11;
+    otPanId                                      mPanId            = 0xFFFF;
+    bool                                         mPromiscuous      = false;
+    int8_t                                       mTxPowerDbm       = 0;
+    int8_t                                       mRxSensitivityDbm = -100;
+    int8_t                                       mCcaThresholdDbm  = -75;
+    bool                                         mMacFcReset       = false;
+    otRadioContext                               mRadioCtx         = {};
+    std::array<uint8_t, OT_RADIO_FRAME_MAX_SIZE> mTxPsdu           = {};
+    otRadioFrame                                 mTxFrame          = {};
+    bool                                         mSrcMatchEnabled  = false;
+    std::vector<otShortAddress>                  mSrcMatchShort;
+    std::vector<std::array<uint8_t, 8>>          mSrcMatchExt;
+
+    // In-memory settings & bounded recent logs
+    std::map<uint16_t, std::vector<std::vector<uint8_t>>> mSettings;
+    std::vector<std::string>                              mLogs;
+};
+
+} // namespace Nodes
+} // namespace otns
+
+#endif // OTNS_NODES_INPROC_NODE_HPP_
