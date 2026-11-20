@@ -216,7 +216,7 @@ TEST_CASE("RfSimServer rejects malformed/oversized handshake frames cleanly")
     CHECK(sim.GetStats().mTotal == 0);
 }
 
-TEST_CASE("Matter --thread-args and raw placeholder spawn modes with node labels")
+TEST_CASE("Matter --thread-arg and raw placeholder spawn modes with node labels")
 {
     SimulationConfig cfg;
 
@@ -241,7 +241,7 @@ TEST_CASE("Matter --thread-args and raw placeholder spawn modes with node labels
         CHECK(leaderSnap->mLabel == "leader-br");
     }
 
-    // 1. Spawn using Matter --thread-args=<id> --thread-args=<socket> --thread-args=<seed> convention.
+    // 1. Spawn using Matter --thread-arg=<id> --thread-arg=<socket> --thread-arg=<seed> convention.
     NodeId matterId =
         server.SpawnExternalNode(OTNS_RFSIM_CLI_BIN, {NodeType::kMed, {40.0, 0.0, 0.0}, 160.0, true, "matter-light"},
                                  {}, 5000, SpawnArgStyle::kMatter);
@@ -613,4 +613,91 @@ TEST_CASE("ot-rfsim v3 virtual backbone: TREL peer discovery/packets, Infra-If A
     ::close(fd2);
     t1.join();
     t2.join();
+}
+
+TEST_CASE("Matter library-mode app (otSysInit + cli_uart otAppCliInit + select loop) end-to-end")
+{
+    SimulationConfig cfg;
+
+    cfg.mSeed     = 9300;
+    cfg.mRfPreset = RadioModelPreset::kMutualInterference;
+
+    Simulation  sim(cfg);
+    RfSimServer server(sim);
+    std::string sockPath = "/tmp/otns_v3_matter_lib_" + std::to_string(static_cast<long>(::getpid())) + ".sock";
+
+    CHECK(server.ListenUnix(sockPath));
+
+    NodeId leaderId = sim.AddNode({NodeType::kRouter, {0.0, 0.0, 0.0}, 160.0, true, "leader"});
+
+    sim.AdvanceSec(10.0);
+
+    std::string datasetHex = FirstNonEmptyLine(sim.ExecuteCli(leaderId, "dataset active -x"));
+
+    CHECK_FALSE(datasetHex.empty());
+
+    // Spawn mock_matter_node using SpawnArgStyle::kMatter (identical args to connectedhomeip all-devices-app).
+    // Note auto_start=false so we also test driving cli_uart commands manually just like test-matter-smoke.py.
+    std::vector<std::string> matterFlags = {
+        "--device",   "on-off-light", "--discriminator",       "3840",
+        "--passcode", "20202021",     "--secured-device-port", "5540",
+    };
+
+    NodeId matterId =
+        server.SpawnExternalNode(OTNS_MOCK_MATTER_BIN, {NodeType::kMed, {40.0, 0.0, 0.0}, 160.0, false, "matter-light"},
+                                 matterFlags, 5000, SpawnArgStyle::kMatter);
+
+    CHECK(matterId != kInvalidNodeId);
+    if (matterId == kInvalidNodeId)
+    {
+        return;
+    }
+
+    // Verify cli_uart echo is cleanly stripped and commands work without otRfSimCompleteStartup()!
+    CHECK(FirstNonEmptyLine(sim.ExecuteCli(matterId, "state")) == "disabled");
+
+    CHECK(sim.ExecuteCli(matterId, "dataset set active " + datasetHex).find("Done") != std::string::npos);
+    CHECK(sim.ExecuteCli(matterId, "mode rn").find("Done") != std::string::npos);
+    CHECK(sim.ExecuteCli(matterId, "ifconfig up").find("Done") != std::string::npos);
+    CHECK(sim.ExecuteCli(matterId, "thread start").find("Done") != std::string::npos);
+
+    sim.AdvanceSec(15.0);
+
+    CHECK(FirstNonEmptyLine(sim.ExecuteCli(matterId, "state")) == "child");
+
+    auto matterSnap = sim.GetNodeSnapshot(matterId);
+
+    CHECK(matterSnap.has_value());
+    if (matterSnap.has_value())
+    {
+        CHECK(matterSnap->mKind == NodeKind::kExternal);
+        CHECK(matterSnap->mRole == DeviceRole::kChild);
+        CHECK(matterSnap->mLabel == "matter-light");
+    }
+
+    CHECK(sim.GetStats().mTotal == 2);
+    CHECK(sim.GetStats().mLeaders == 1);
+    CHECK(sim.GetStats().mChildren == 1);
+    CHECK(sim.GetStats().mPartitions == 1);
+
+    // Bidirectional IPv6 ping over simulated 802.15.4 RF between Leader and Matter library-mode node!
+    std::string matterMleid = FirstNonEmptyLine(sim.ExecuteCli(matterId, "ipaddr mleid"));
+    std::string leaderMleid = FirstNonEmptyLine(sim.ExecuteCli(leaderId, "ipaddr mleid"));
+
+    CHECK_FALSE(matterMleid.empty());
+    CHECK_FALSE(leaderMleid.empty());
+
+    if (!matterMleid.empty() && !leaderMleid.empty())
+    {
+        (void)sim.ExecuteCli(leaderId, "ping " + matterMleid);
+        sim.AdvanceSec(2.0);
+        CHECK(sim.TakeCliOutput(leaderId).find("1 packets transmitted, 1 packets received") != std::string::npos);
+
+        (void)sim.ExecuteCli(matterId, "ping " + leaderMleid);
+        sim.AdvanceSec(2.0);
+        CHECK(sim.TakeCliOutput(matterId).find("1 packets transmitted, 1 packets received") != std::string::npos);
+    }
+
+    CHECK(sim.RemoveNode(matterId));
+    CHECK(sim.GetStats().mTotal == 1);
 }

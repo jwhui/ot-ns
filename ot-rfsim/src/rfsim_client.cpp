@@ -51,6 +51,9 @@
 #include <openthread/tasklet.h>
 #include <openthread/platform/alarm-micro.h>
 #include <openthread/platform/alarm-milli.h>
+#if OPENTHREAD_CONFIG_DIAG_ENABLE
+#include <openthread/platform/diag.h>
+#endif
 #include <openthread/platform/entropy.h>
 #include <openthread/platform/memory.h>
 #include <openthread/platform/misc.h>
@@ -365,6 +368,7 @@ bool Client::Connect(void)
 {
     Disconnect();
     mDisconnected     = false;
+    mCompletedStartup = false;
     mHasPushedStatus  = false;
     mTrelEnabled      = false;
     mTrelPort         = 0;
@@ -557,7 +561,13 @@ bool Client::RecvMoreBytes(int aTimeoutMs)
 
 bool Client::CompleteStartup(otInstance *aInstance)
 {
-    mInstance = aInstance;
+    if (mCompletedStartup)
+    {
+        return !mDisconnected;
+    }
+
+    mInstance         = aInstance;
+    mCompletedStartup = true;
     DrainTasklets(aInstance);
     SyncAlarmToSim();
     SyncStatusToSim(aInstance, true);
@@ -566,8 +576,17 @@ bool Client::CompleteStartup(otInstance *aInstance)
     return !mDisconnected;
 }
 
+void Client::EnsureStartupCompleted(otInstance *aInstance)
+{
+    if (!mCompletedStartup && !mDisconnected && aInstance != nullptr)
+    {
+        (void)CompleteStartup(aInstance);
+    }
+}
+
 void Client::ResetForPseudoReset(void)
 {
+    mCompletedStartup = false;
     mAlarmMilliUs.reset();
     mAlarmMicroUs.reset();
     mLastSentAlarmUs.reset();
@@ -591,6 +610,7 @@ void Client::ResetForPseudoReset(void)
 
 otError Client::UartEnable(void)
 {
+#if OPENTHREAD_RADIO
     if (mUartInFd < 0)
     {
         mUartInFd  = ::dup(STDIN_FILENO);
@@ -636,6 +656,7 @@ otError Client::UartEnable(void)
             (void)::fcntl(mUartOutFd, F_SETFL, outFlags | O_NONBLOCK);
         }
     }
+#endif
 
     mUartEnabled = true;
     mUartTxBuf   = nullptr;
@@ -655,7 +676,43 @@ otError Client::UartDisable(void)
 
 otError Client::UartSend(const uint8_t *aBuf, uint16_t aBufLength)
 {
-    if (!mUartEnabled || mUartOutFd < 0 || aBuf == nullptr)
+    if (!mUartEnabled || aBuf == nullptr)
+    {
+        return OT_ERROR_FAILED;
+    }
+
+#if !OPENTHREAD_RADIO
+    // Library / FTD / Matter mode: route OpenThread cli_uart output directly over ot-rfsim v3 kCliData,
+    // stripping any byte-for-byte echo of the command line just fed into otPlatUartReceived().
+    const char *data = reinterpret_cast<const char *>(aBuf);
+    size_t      len  = aBufLength;
+
+    if (mUartEchoOffset < mUartEchoExpected.size())
+    {
+        size_t remaining = mUartEchoExpected.size() - mUartEchoOffset;
+        size_t cmpLen    = std::min(len, remaining);
+
+        if (std::memcmp(data, mUartEchoExpected.data() + mUartEchoOffset, cmpLen) == 0)
+        {
+            mUartEchoOffset += cmpLen;
+            data += cmpLen;
+            len -= cmpLen;
+        }
+        else
+        {
+            mUartEchoExpected.clear();
+            mUartEchoOffset = 0;
+        }
+    }
+
+    if (len > 0)
+    {
+        SendCliOutput(data, len);
+    }
+    otPlatUartSendDone();
+    return OT_ERROR_NONE;
+#else
+    if (mUartOutFd < 0)
     {
         return OT_ERROR_FAILED;
     }
@@ -668,10 +725,14 @@ otError Client::UartSend(const uint8_t *aBuf, uint16_t aBufLength)
     mUartTxLen = aBufLength;
 
     return OT_ERROR_NONE;
+#endif
 }
 
 otError Client::UartFlush(void)
 {
+#if !OPENTHREAD_RADIO
+    return mUartEnabled ? OT_ERROR_NONE : OT_ERROR_INVALID_STATE;
+#else
     if (!mUartEnabled || mUartOutFd < 0 || mUartTxBuf == nullptr || mUartTxLen == 0)
     {
         return OT_ERROR_INVALID_STATE;
@@ -703,6 +764,7 @@ otError Client::UartFlush(void)
     otPlatUartSendDone();
 
     return OT_ERROR_NONE;
+#endif
 }
 
 void Client::FlushUartNonBlocking(void)
@@ -750,7 +812,9 @@ void Client::ProcessDrivers(otInstance *aInstance)
         return;
     }
 
-    if (!mUartEnabled)
+    EnsureStartupCompleted(aInstance);
+
+    if (!mUartEnabled || mUartInFd < 0)
     {
         DrainFrames(aInstance);
         if (!mDisconnected && mRxBuffer.empty())
@@ -907,7 +971,7 @@ bool Client::HasPendingWork(otInstance *aInstance) const
     }
 
     return !mRxBuffer.empty() || mHasPendingTasklets || (aInstance != nullptr && otTaskletsArePending(aInstance)) ||
-           (mUartEnabled && mUartTxLen > 0);
+           (mUartEnabled && mUartOutFd >= 0 && mUartTxLen > 0);
 }
 
 void Client::ProcessPendingWork(otInstance *aInstance)
@@ -1288,9 +1352,29 @@ void Client::HandleFrame(otInstance *aInstance, const Protocol::Frame &aFrame)
     {
         auto line = aFrame.GetText(Protocol::TlvType::kText);
 
-        if (line.has_value() && mCliCallback != nullptr)
+        if (line.has_value())
         {
-            mCliCallback(line->c_str(), mCliContext);
+            if (mCliCallback != nullptr)
+            {
+                mCliCallback(line->c_str(), mCliContext);
+            }
+            else if (mUartEnabled)
+            {
+                std::string uartLine = *line;
+
+                while (!uartLine.empty() && (uartLine.back() == '\n' || uartLine.back() == '\r'))
+                {
+                    uartLine.pop_back();
+                }
+                uartLine.append("\r\n");
+
+                mUartEchoExpected = uartLine;
+                mUartEchoOffset   = 0;
+                otPlatUartReceived(reinterpret_cast<const uint8_t *>(uartLine.data()),
+                                   static_cast<uint16_t>(uartLine.size()));
+                mUartEchoExpected.clear();
+                mUartEchoOffset = 0;
+            }
         }
         DrainTasklets(aInstance);
         SyncAlarmToSim();
@@ -2462,11 +2546,11 @@ void otSysInit(int aArgCount, char *aArgVector[])
         {
             appName = eqVal;
         }
-        else if (arg == "--thread-args" && i + 1 < aArgCount)
+        else if ((arg == "--thread-arg" || arg == "--thread-args") && i + 1 < aArgCount)
         {
             positional.push_back(aArgVector[++i]);
         }
-        else if (extractEq(arg, "--thread-args=", eqVal))
+        else if (extractEq(arg, "--thread-arg=", eqVal) || extractEq(arg, "--thread-args=", eqVal))
         {
             positional.push_back(eqVal);
         }
@@ -2542,7 +2626,9 @@ void otSysUpdateEvents(otInstance     *aInstance,
                        fd_set         *aErrorFdSet,
                        struct timeval *aTimeout)
 {
-    int fd = Client::Get().GetSocketFd();
+    Client::Get().EnsureStartupCompleted(aInstance);
+
+    int fd = Client::Get().IsConnected() ? Client::Get().GetSocketFd() : -1;
 
     (void)aWriteFdSet;
 
@@ -2579,7 +2665,7 @@ void otSysProcessEvents(otInstance   *aInstance,
                         const fd_set *aWriteFdSet,
                         const fd_set *aErrorFdSet)
 {
-    int fd = Client::Get().GetSocketFd();
+    int fd = Client::Get().IsConnected() ? Client::Get().GetSocketFd() : -1;
 
     (void)aWriteFdSet;
 
@@ -2612,6 +2698,55 @@ otPlatResetReason otPlatGetResetReason(otInstance *aInstance)
 }
 
 void otPlatWakeHost(void) {}
+
+otError otPlatSetMcuPowerState(otInstance *aInstance, otPlatMcuPowerState aState)
+{
+    (void)aInstance;
+    return (aState == OT_PLAT_MCU_POWER_STATE_ON || aState == OT_PLAT_MCU_POWER_STATE_LOW_POWER) ? OT_ERROR_NONE
+                                                                                                 : OT_ERROR_FAILED;
+}
+
+otPlatMcuPowerState otPlatGetMcuPowerState(otInstance *aInstance)
+{
+    (void)aInstance;
+    return OT_PLAT_MCU_POWER_STATE_ON;
+}
+
+#if OPENTHREAD_CONFIG_PLATFORM_ASSERT_MANAGEMENT
+void otPlatAssertFail(const char *aFilename, int aLineNumber)
+{
+    std::fprintf(stderr, "ot-rfsim v3 assert failed at %s:%d\n", (aFilename != nullptr) ? aFilename : "?", aLineNumber);
+    std::abort();
+}
+#endif
+
+#if OPENTHREAD_CONFIG_DIAG_ENABLE
+static bool sDiagMode = false;
+
+void otPlatDiagSetOutputCallback(otInstance *aInstance, otPlatDiagOutputCallback aCallback, void *aContext)
+{
+    (void)aInstance;
+    (void)aCallback;
+    (void)aContext;
+}
+
+void otPlatDiagModeSet(bool aMode) { sDiagMode = aMode; }
+
+bool otPlatDiagModeGet(void) { return sDiagMode; }
+
+void otPlatDiagChannelSet(uint8_t aChannel) { (void)aChannel; }
+
+void otPlatDiagTxPowerSet(int8_t aTxPower) { (void)aTxPower; }
+
+void otPlatDiagRadioReceived(otInstance *aInstance, otRadioFrame *aFrame, otError aError)
+{
+    (void)aInstance;
+    (void)aFrame;
+    (void)aError;
+}
+
+void otPlatDiagAlarmCallback(otInstance *aInstance) { (void)aInstance; }
+#endif
 
 void otTaskletsSignalPending(otInstance *aInstance)
 {
@@ -2687,40 +2822,49 @@ void otPlatAlarmMicroStop(otInstance *aInstance)
     Client::Get().StopAlarmMicro();
 }
 
-void otPlatSettingsInit(otInstance *aInstance, const uint16_t *aSensitiveKeys, uint16_t aSensitiveKeysLength)
+OT_TOOL_WEAK void otPlatSettingsInit(otInstance     *aInstance,
+                                     const uint16_t *aSensitiveKeys,
+                                     uint16_t        aSensitiveKeysLength)
 {
     (void)aInstance;
     (void)aSensitiveKeys;
     (void)aSensitiveKeysLength;
 }
 
-void otPlatSettingsDeinit(otInstance *aInstance) { (void)aInstance; }
+OT_TOOL_WEAK void otPlatSettingsDeinit(otInstance *aInstance) { (void)aInstance; }
 
-otError otPlatSettingsGet(otInstance *aInstance, uint16_t aKey, int aIndex, uint8_t *aValue, uint16_t *aValueLength)
+OT_TOOL_WEAK otError
+otPlatSettingsGet(otInstance *aInstance, uint16_t aKey, int aIndex, uint8_t *aValue, uint16_t *aValueLength)
 {
     (void)aInstance;
     return Client::Get().SettingsGet(aKey, aIndex, aValue, aValueLength);
 }
 
-otError otPlatSettingsSet(otInstance *aInstance, uint16_t aKey, const uint8_t *aValue, uint16_t aValueLength)
+OT_TOOL_WEAK otError otPlatSettingsSet(otInstance    *aInstance,
+                                       uint16_t       aKey,
+                                       const uint8_t *aValue,
+                                       uint16_t       aValueLength)
 {
     (void)aInstance;
     return Client::Get().SettingsSet(aKey, aValue, aValueLength);
 }
 
-otError otPlatSettingsAdd(otInstance *aInstance, uint16_t aKey, const uint8_t *aValue, uint16_t aValueLength)
+OT_TOOL_WEAK otError otPlatSettingsAdd(otInstance    *aInstance,
+                                       uint16_t       aKey,
+                                       const uint8_t *aValue,
+                                       uint16_t       aValueLength)
 {
     (void)aInstance;
     return Client::Get().SettingsAdd(aKey, aValue, aValueLength);
 }
 
-otError otPlatSettingsDelete(otInstance *aInstance, uint16_t aKey, int aIndex)
+OT_TOOL_WEAK otError otPlatSettingsDelete(otInstance *aInstance, uint16_t aKey, int aIndex)
 {
     (void)aInstance;
     return Client::Get().SettingsDelete(aKey, aIndex);
 }
 
-void otPlatSettingsWipe(otInstance *aInstance)
+OT_TOOL_WEAK void otPlatSettingsWipe(otInstance *aInstance)
 {
     (void)aInstance;
     Client::Get().SettingsWipe();

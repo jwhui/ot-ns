@@ -297,6 +297,29 @@ if(OTNS_BUILD_TESTS)
     add_test(NAME test_server_rpc COMMAND test_server_rpc)
 
     if(OTNS_BUILD_RFSIM)
+        # Matter library-mode test app exercising upstream connectedhomeip lifecycle
+        # (otSysInit + real OpenThread cli_uart.cpp otAppCliInit + otSysUpdateEvents/ProcessEvents)
+        add_executable(mock_matter_node
+            tests/mock_matter_node.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/openthread/examples/apps/cli/cli_uart.cpp
+        )
+        set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/openthread/examples/apps/cli/cli_uart.cpp PROPERTIES
+            COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-shadow;-Wno-pedantic"
+        )
+        target_include_directories(mock_matter_node PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/openthread/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/openthread/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/openthread/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/openthread/examples/platforms
+        )
+        target_link_libraries(mock_matter_node PRIVATE
+            openthread-cli-ftd
+            openthread-ftd
+            openthread-rfsim-v3
+            mbedtls
+            otns_build_options
+        )
+
         add_executable(test_rfsim_hybrid
             tests/test_main.cpp
             tests/test_rfsim_hybrid.cpp
@@ -304,8 +327,9 @@ if(OTNS_BUILD_TESTS)
         target_link_libraries(test_rfsim_hybrid PRIVATE otns_core otns_doctest otns_build_options)
         target_compile_definitions(test_rfsim_hybrid PRIVATE
             OTNS_RFSIM_CLI_BIN="$<TARGET_FILE:ot-cli-ftd-rfsim>"
+            OTNS_MOCK_MATTER_BIN="$<TARGET_FILE:mock_matter_node>"
         )
-        add_dependencies(test_rfsim_hybrid ot-cli-ftd-rfsim)
+        add_dependencies(test_rfsim_hybrid ot-cli-ftd-rfsim mock_matter_node)
         add_test(NAME test_rfsim_hybrid COMMAND test_rfsim_hybrid)
     endif()
 

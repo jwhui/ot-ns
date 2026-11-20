@@ -121,6 +121,8 @@ public:
     otError UartSend(const uint8_t *aBuf, uint16_t aBufLength);
     otError UartFlush(void);
     bool    IsUartEnabled(void) const { return mUartEnabled; }
+    bool    HasCompletedStartup(void) const { return mCompletedStartup; }
+    void    EnsureStartupCompleted(otInstance *aInstance);
 
     // Alarm platform hooks
     void StartAlarmMilliAt(uint32_t aT0Ms, uint32_t aDtMs);
@@ -209,6 +211,7 @@ private:
     uint64_t    mNowUs                = 0;
     int         mSockFd               = -1;
     bool        mDisconnected         = false;
+    bool        mCompletedStartup     = false;
     bool        mPseudoResetRequested = false;
     bool        mHasPendingTasklets   = false;
     otInstance *mInstance             = nullptr;
@@ -247,12 +250,14 @@ private:
 
     std::map<uint16_t, std::vector<std::vector<uint8_t>>> mSettings;
 
-    // Spinel UART state (RCP mode)
+    // Spinel / CLI UART state (RCP & library modes)
     bool           mUartEnabled = false;
     int            mUartInFd    = -1;
     int            mUartOutFd   = -1;
     const uint8_t *mUartTxBuf   = nullptr;
     uint16_t       mUartTxLen   = 0;
+    std::string    mUartEchoExpected;
+    size_t         mUartEchoOffset = 0;
 
     // Virtual backbone state (TREL / Infra-If AIL / Host UDP)
     bool                  mTrelEnabled           = false;

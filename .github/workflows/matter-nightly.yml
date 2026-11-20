@@ -1,0 +1,112 @@
+# Copyright (c) 2026, The OTNS Authors.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# 3. Neither the name of the copyright holder nor the
+#    names of its contributors may be used to endorse or promote products
+#    derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# Opt-in nightly / manual Matter-over-Thread end-to-end verification against
+# upstream project-chip/connectedhomeip. Runs natively on ubuntu-24.04 (no Docker)
+# inside an isolated Linux network namespace (`unshare --net`) and is excluded from
+# PR CI so everyday OTNS v3 pull requests stay fast and submodule-free.
+
+name: Matter Integration (Nightly)
+
+on:
+  schedule:
+    # Weekly on Sunday 05:17 UTC
+    - cron: '17 5 * * 0'
+  workflow_dispatch:
+    inputs:
+      matter_ref:
+        description: 'Upstream project-chip/connectedhomeip branch, tag, or commit SHA'
+        required: false
+        default: 'master'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  matter-smoke:
+    name: Matter-over-Thread Smoke Test (native ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 4G
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Restore ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: matter-ccache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.matter_ref || 'master' }}-${{ hashFiles('ot-rfsim/**', 'src/protocol/**') }}
+          restore-keys: |
+            matter-ccache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.matter_ref || 'master' }}-
+            matter-ccache-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build OTNS v3 daemon and ot-rfsim v3 binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+          cmake -S . -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOTNS_BUILD_WEB=OFF \
+            -DOTNS_BUILD_TESTS=OFF
+          cmake --build build-release --target otns ot-cli-ftd-rfsim ot-rcp-rfsim
+
+      - name: Build upstream connectedhomeip Matter apps and otbr-agent natively
+        run: |
+          ./script/build-matter-deps.sh \
+            --install-deps \
+            --work-dir "${RUNNER_TEMP}/otns-matter" \
+            --matter-ref "${{ inputs.matter_ref || 'master' }}" \
+            --jobs "$(nproc)"
+          ccache --show-stats || true
+
+      - name: Run Matter commissioning & OnOff cluster smoke test (isolated Linux netns)
+        run: |
+          mkdir -p matter_artifacts
+          sudo unshare --net -- python3 script/test-matter-smoke.py \
+            --otns-bin "${PWD}/build-release/otns" \
+            --rcp-bin "${PWD}/build-release/ot-rfsim/ot-rcp-rfsim" \
+            --matter-app "${RUNNER_TEMP}/otns-matter/bin/all-devices-app" \
+            --chip-tool "${RUNNER_TEMP}/otns-matter/bin/chip-tool" \
+            --otbr-agent "${RUNNER_TEMP}/otns-matter/bin/otbr-agent" \
+            --ot-ctl "${RUNNER_TEMP}/otns-matter/bin/ot-ctl" \
+            --output-dir "${PWD}/matter_artifacts"
+
+      - name: Upload PCAP, KPI, and Web UI replay artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: matter-smoke-artifacts
+          retention-days: 14
+          path: matter_artifacts/

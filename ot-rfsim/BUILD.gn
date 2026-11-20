@@ -1,0 +1,84 @@
+# Copyright (c) 2026, The OTNS Authors.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# 3. Neither the name of the copyright holder nor the
+#    names of its contributors may be used to endorse or promote products
+#    derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# GN build definition for integrating ot-rfsim v3 into project-chip/connectedhomeip
+# (via third_party/openthread/platforms/otns/BUILD.gn).
+
+import("//build_overrides/build.gni")
+import("//build_overrides/chip.gni")
+import("//build_overrides/openthread.gni")
+import("${chip_root}/src/platform/device.gni")
+
+config("rfsim_v3_public_config") {
+  include_dirs = [ "include" ]
+}
+
+static_library("otns") {
+  # Matter owns process-wide signal handlers and syslog; run ot-rfsim v3 in library mode.
+  defines = [ "OPENTHREAD_RFSIM_CONFIG_LIBRARY_MODE_ENABLE=1" ]
+
+  include_dirs = [
+    "src",
+    "../src",
+    "${openthread_root}/examples/platforms",
+    "${openthread_root}/examples/platforms/utils",
+  ]
+
+  public = [
+    "${openthread_root}/examples/platforms/openthread-select.h",
+    "${openthread_root}/examples/platforms/openthread-system.h",
+    "include/ot_rfsim_v3.h",
+  ]
+
+  sources = [
+    "${openthread_root}/src/lib/platform/exit_code.c",
+    "${openthread_root}/src/lib/platform/exit_code.h",
+    "../src/protocol/rfsim_v3_codec.cpp",
+    "../src/protocol/rfsim_v3_codec.hpp",
+    "src/rfsim_client.cpp",
+    "src/rfsim_client.hpp",
+  ]
+
+  # ConnectedHomeIP links OpenThread's cli_uart so OTNS can issue OpenThread CLI
+  # commands to Matter nodes over ot-rfsim v3 kCliData via otPlatUart*.
+  deps = [
+    "${chip_root}/third_party/openthread:openthread_cli",
+    "${chip_root}/third_party/openthread/platforms:libopenthread-platform-utils",
+    "${openthread_root}/examples/apps/cli:cli_uart",
+    "${openthread_root}/src/core:libopenthread_core_headers",
+  ]
+
+  if (chip_openthread_ftd) {
+    configs += [ "${openthread_root}:openthread_ftd_config" ]
+  } else {
+    configs += [ "${openthread_root}:openthread_mtd_config" ]
+  }
+
+  public_configs = [
+    ":rfsim_v3_public_config",
+    "${chip_root}/third_party/openthread/platforms:libopenthread-platform_config",
+  ]
+}

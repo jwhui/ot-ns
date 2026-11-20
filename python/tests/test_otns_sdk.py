@@ -388,7 +388,7 @@ class TestOtnsV3Sdk(unittest.TestCase):
             dataset_hex = first_non_empty_line(cli.cli(leader, "dataset active -x"))
             self.assertTrue(dataset_hex)
 
-            # Spawn one node in native otns style and one in Matter --thread-args style.
+            # Spawn one node in native otns style and one in Matter --thread-arg style.
             n_otns = cli.spawn_node(
                 rfsim_bin,
                 node_type="med",

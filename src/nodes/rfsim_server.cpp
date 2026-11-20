@@ -410,9 +410,9 @@ Rf::NodeId RfSimServer::SpawnExternalNode(const std::string              &aExecu
     }
     else if (aArgStyle == SpawnArgStyle::kMatter)
     {
-        args.push_back("--thread-args=" + std::to_string(assignedId));
-        args.push_back("--thread-args=" + sockOrEp);
-        args.push_back("--thread-args=" + std::to_string(spawnSeed));
+        args.push_back("--thread-arg=" + std::to_string(assignedId));
+        args.push_back("--thread-arg=" + sockOrEp);
+        args.push_back("--thread-arg=" + std::to_string(spawnSeed));
         for (const auto &extra : aExtraArgs)
         {
             args.push_back(extra);

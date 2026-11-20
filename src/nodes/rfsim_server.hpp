@@ -48,7 +48,7 @@ namespace Nodes {
 enum class SpawnArgStyle : uint8_t
 {
     kOtns   = 0, // Passes --endpoint <uri> --node-id <id> [--label <lbl>] + extra args
-    kMatter = 1, // Passes --thread-args=<id> --thread-args=<sock> [--thread-args=<seed>] + extra args
+    kMatter = 1, // Passes --thread-arg=<id> --thread-arg=<sock> --thread-arg=<seed> + extra args
     kRaw    = 2, // Passes extra args directly with {endpoint}, {socket}, {node_id}, {seed} substitution
 };
 
