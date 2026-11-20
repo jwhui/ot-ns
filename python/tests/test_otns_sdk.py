@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -173,6 +174,56 @@ class TestOtnsV3Sdk(unittest.TestCase):
                 self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
                 self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
                 self.assertIn("OTNS v3", body)
+
+    def test_hybrid_external_rfsim_node(self) -> None:
+        otns_bin = find_otns_bin()
+        rfsim_bin = otns_bin.parent / "ot-rfsim" / "ot-cli-ftd-rfsim"
+        if not rfsim_bin.is_file():
+            self.skipTest(f"External ot-rfsim binary not found at {rfsim_bin}")
+
+        sess = OtnsSession(otns_bin, seed=101, rf_model="Ideal", speed=0.0, enable_rfsim=True)
+        with sess as cli:
+            assert sess.rfsim_socket_path is not None
+            n1 = cli.add_router(x=0.0, y=0.0, radio_range=160.0)
+            cli.go(seconds=10.0)
+            dataset_hex = first_non_empty_line(cli.cli(n1, "dataset active -x"))
+            self.assertTrue(dataset_hex)
+
+            ext = subprocess.Popen(
+                [str(rfsim_bin), "--socket", str(sess.rfsim_socket_path), "--node-id", "2"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if any(n.node_id == 2 and n.kind == "external" for n in cli.nodes()):
+                        break
+                    time.sleep(0.05)
+
+                nodes = {n.node_id: n for n in cli.nodes()}
+                self.assertIn(2, nodes)
+                self.assertEqual(nodes[2].kind, "external")
+
+                cli.move_node(2, 40.0, 0.0)
+                cli.cli(2, f"dataset set active {dataset_hex}")
+                cli.cli(2, "ifconfig up")
+                cli.cli(2, "thread start")
+                cli.go(seconds=20.0)
+
+                st = cli.stats()
+                self.assertEqual(st.total, 2)
+                self.assertEqual(st.leaders, 1)
+                self.assertEqual(st.partitions, 1)
+                self.assertEqual(st.detached, 0)
+
+                n2_mleid = first_non_empty_line(cli.cli(2, "ipaddr mleid"))
+                cli.cli(1, f"ping {n2_mleid}")
+                cli.go(seconds=2.0)
+                self.assertIn("1 packets transmitted, 1 packets received", cli.take_cli_output(1))
+            finally:
+                ext.terminate()
+                ext.wait(timeout=5.0)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ public:
     static constexpr size_t kMaxHttpHeaderBytes = 16u * 1024u;
     static constexpr size_t kMaxWsFrameBytes    = 1024u * 1024u;
     static constexpr size_t kMaxTxQueueBytes    = 4u * 1024u * 1024u;
+    static constexpr size_t kMaxClients         = 64u;
 
     using ConnectCallback    = std::function<void(ClientId aClientId)>;
     using DisconnectCallback = std::function<void(ClientId aClientId)>;
@@ -130,7 +131,7 @@ private:
                            bool               aKeepAlive = false);
     void QueueWsFrame(Connection &aConn, uint8_t aOpcode, const uint8_t *aPayload, size_t aLength);
     void ServeStaticAsset(Connection &aConn, const std::string &aUrlPath);
-    bool IsOriginAllowed(const std::string &aOrigin) const;
+    bool IsOriginAllowed(const std::string &aOrigin, const std::string &aHostHeader) const;
     void CloseConnection(ClientId aClientId);
 
     int                   mHttpListenFd           = -1;

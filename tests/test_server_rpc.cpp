@@ -29,6 +29,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -405,4 +406,59 @@ TEST_CASE("WebSocket JSON-RPC, VizPublisher coalesced diffs, JSONL replay, and C
     CHECK(repl.ExecuteLine("node 1 state", oss));
     CHECK(oss.str().find("leader") != std::string::npos);
     CHECK_FALSE(repl.ExecuteLine("quit", oss));
+}
+
+TEST_CASE("WsServer enforces Origin check on 0.0.0.0 bind and owner-only Unix socket permissions")
+{
+    TempOutDir outDir;
+    WsServer   server;
+    auto       sockPath = outDir.mPath / "rpc.sock";
+
+    CHECK(server.ListenHttp(0, "0.0.0.0"));
+    CHECK(server.ListenRpcUnix(sockPath.string()));
+
+    struct stat st;
+
+    CHECK(::stat(sockPath.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0600);
+
+    uint16_t    port = server.GetHttpPort();
+    std::string resp;
+    bool        done = false;
+
+    std::thread client([&](void) {
+        int fd = ConnectLoopback(port);
+
+        if (fd >= 0)
+        {
+            std::string req = "GET /ws HTTP/1.1\r\n"
+                              "Host: 127.0.0.1:" +
+                              std::to_string(port) +
+                              "\r\n"
+                              "Upgrade: websocket\r\n"
+                              "Connection: Upgrade\r\n"
+                              "Origin: https://evil.example\r\n"
+                              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                              "Sec-WebSocket-Version: 13\r\n\r\n";
+
+            (void)::send(fd, req.data(), req.size(), 0);
+            char    buf[1024];
+            ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+
+            if (n > 0)
+            {
+                resp.assign(buf, static_cast<size_t>(n));
+            }
+            ::close(fd);
+        }
+        done = true;
+    });
+
+    for (int i = 0; i < 60 && !done; ++i)
+    {
+        server.PollOnce(10);
+    }
+    client.join();
+
+    CHECK(resp.find("403 Forbidden") != std::string::npos);
 }

@@ -54,6 +54,8 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -668,10 +670,12 @@ void Client::HandleFrame(otInstance *aInstance, const Protocol::Frame &aFrame)
         if (mAlarmMicroUs.has_value() && *mAlarmMicroUs <= mNowUs)
         {
             mAlarmMicroUs.reset();
+#if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
             if (aInstance != nullptr)
             {
                 otPlatAlarmMicroFired(aInstance);
             }
+#endif
         }
         if (mAlarmMilliUs.has_value() && *mAlarmMilliUs <= mNowUs)
         {
@@ -1462,6 +1466,19 @@ otError otPlatEntropyGet(uint8_t *aOutput, uint16_t aOutputLength)
     }
 
     return OT_ERROR_NONE;
+}
+
+void otPlatLog(otLogLevel aLogLevel, otLogRegion aLogRegion, const char *aFormat, ...)
+{
+    char    buf[512];
+    va_list args;
+
+    (void)aLogRegion;
+    va_start(args, aFormat);
+    std::vsnprintf(buf, sizeof(buf), aFormat, args);
+    va_end(args);
+
+    Client::Get().SendLog(aLogLevel, buf);
 }
 
 void otPlatLogOutput(otInstance *aInstance, otLogLevel aLogLevel, const char *aLogLine)

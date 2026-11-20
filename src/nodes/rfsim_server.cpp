@@ -34,6 +34,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -210,7 +211,16 @@ bool RfSimServer::ListenUnix(const std::string &aSocketPath)
     addr.sun_family = AF_UNIX;
     std::memcpy(addr.sun_path, aSocketPath.c_str(), aSocketPath.size() + 1);
 
-    if (::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0 || ::listen(fd, 64) < 0)
+    if (::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0)
+    {
+        ::close(fd);
+        (void)::unlink(aSocketPath.c_str());
+        return false;
+    }
+
+    (void)::chmod(aSocketPath.c_str(), 0600);
+
+    if (::listen(fd, 64) < 0)
     {
         ::close(fd);
         (void)::unlink(aSocketPath.c_str());
@@ -323,7 +333,9 @@ Rf::NodeId RfSimServer::AcceptExternalNode(const Core::NodeConfig &aConfig, int 
         (void)::setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     }
 
-    return HandshakeAndRegister(clientFd, aConfig, -1, aTimeoutMs);
+    int handshakeTimeoutMs = (aTimeoutMs > 0) ? aTimeoutMs : 2000;
+
+    return HandshakeAndRegister(clientFd, aConfig, -1, handshakeTimeoutMs);
 }
 
 Rf::NodeId RfSimServer::SpawnExternalNode(const std::string              &aExecutable,

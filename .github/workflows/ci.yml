@@ -1,0 +1,191 @@
+# Copyright (c) 2026, The OTNS Authors.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# 3. Neither the name of the copyright holder nor the
+#    names of its contributors may be used to endorse or promote products
+#    derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - 'dependabot/**'
+  pull_request:
+    branches:
+      - 'v3'
+      - 'main'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.repository == 'openthread/ot-ns' && github.run_id) || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format, Typecheck & Schema Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install clang-format 19
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-19 || sudo bash openthread/script/install-llvm.sh
+
+      - name: Check C/C++ formatting (OpenThread style)
+        run: ./script/make-pretty check
+
+      - name: Typecheck and build Vite web visualizer
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
+      - name: Validate Python sources and JSON schema
+        run: |
+          python3 -m compileall -q python script
+          python3 -c 'import json; json.load(open("protocol/schema/viz_rpc_v1.schema.json"))'
+
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, ubuntu-24.04-arm, macos-15 ]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Build & test headless C++17 (no Node.js dependency)
+        run: |
+          cmake -S . -B build-headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DOTNS_BUILD_WEB=OFF
+          cmake --build build-headless
+          ctest --test-dir build-headless --output-on-failure
+
+      - name: Build & test full Release with embedded Web UI
+        run: |
+          npm --prefix web ci
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DOTNS_BUILD_WEB=ON
+          cmake --build build-release
+          ctest --test-dir build-release --output-on-failure
+
+      - name: Run Python SDK & 200-node scale tests
+        run: |
+          OTNS_BIN="${{ github.workspace }}/build-release/otns" \
+            python3 -W error::ResourceWarning -m unittest discover -s python/tests -v
+
+      - name: Run Python example scripts (smoke)
+        run: |
+          for script in python/examples/*.py; do
+            echo "=== Running ${script} ==="
+            OTNS_BIN="${{ github.workspace }}/build-release/otns" python3 "${script}"
+          done
+
+      - name: Verify standalone ot-rfsim v3 library & CLI build
+        run: |
+          cmake -S ot-rfsim -B build-rfsim-standalone -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-rfsim-standalone
+
+  sanitizers:
+    name: ASan + UBSan (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang
+
+      - name: Build & run C++ tests with ASan/UBSan
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DOTNS_ENABLE_SANITIZERS=ON \
+            -DOTNS_BUILD_WEB=OFF
+          cmake --build build-asan
+          ctest --test-dir build-asan --output-on-failure
+
+      - name: Run Python SDK suite against ASan otns daemon
+        run: |
+          OTNS_BIN="${{ github.workspace }}/build-asan/otns" \
+            python3 -W error::ResourceWarning -m unittest discover -s python/tests -v

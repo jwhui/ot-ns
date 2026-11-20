@@ -34,6 +34,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -257,8 +258,16 @@ bool WsServer::ListenRpcUnix(const std::string &aSocketPath)
     addr.sun_family = AF_UNIX;
     std::memcpy(addr.sun_path, aSocketPath.c_str(), aSocketPath.size() + 1);
 
-    if (!SetNonBlocking(fd) || ::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0 ||
-        ::listen(fd, 32) < 0)
+    if (!SetNonBlocking(fd) || ::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0)
+    {
+        ::close(fd);
+        (void)::unlink(aSocketPath.c_str());
+        return false;
+    }
+
+    (void)::chmod(aSocketPath.c_str(), 0600);
+
+    if (::listen(fd, 32) < 0)
     {
         ::close(fd);
         (void)::unlink(aSocketPath.c_str());
@@ -301,18 +310,33 @@ void WsServer::Close(void)
     mHttpPort = 0;
 }
 
-bool WsServer::IsOriginAllowed(const std::string &aOrigin) const
+bool WsServer::IsOriginAllowed(const std::string &aOrigin, const std::string &aHostHeader) const
 {
-    if (!mRestrictLoopbackOrigin || aOrigin.empty())
+    if (aOrigin.empty())
     {
         return true;
     }
 
     std::string lower = ToLowerAscii(TrimWhitespace(aOrigin));
 
-    return MatchesHostPrefix(lower, "http://127.0.0.1") || MatchesHostPrefix(lower, "http://localhost") ||
-           MatchesHostPrefix(lower, "http://[::1]") || MatchesHostPrefix(lower, "https://127.0.0.1") ||
-           MatchesHostPrefix(lower, "https://localhost");
+    if (MatchesHostPrefix(lower, "http://127.0.0.1") || MatchesHostPrefix(lower, "http://localhost") ||
+        MatchesHostPrefix(lower, "http://[::1]") || MatchesHostPrefix(lower, "https://127.0.0.1") ||
+        MatchesHostPrefix(lower, "https://localhost") || MatchesHostPrefix(lower, "https://[::1]"))
+    {
+        return true;
+    }
+
+    if (!mRestrictLoopbackOrigin && !aHostHeader.empty())
+    {
+        std::string hostLower = ToLowerAscii(TrimWhitespace(aHostHeader));
+
+        if (lower == ("http://" + hostLower) || lower == ("https://" + hostLower))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool WsServer::SendText(ClientId aClientId, const std::string &aText)
@@ -445,9 +469,22 @@ void WsServer::ServeStaticAsset(Connection &aConn, const std::string &aUrlPath)
         return;
     }
 
-    // Reject path traversal attempts up front.
-    if (cleanPath[0] != '/' || cleanPath.find("..") != std::string::npos || cleanPath.find('\\') != std::string::npos ||
-        cleanPath.find('\0') != std::string::npos)
+    // Reject path traversal, percent-encoding tricks, and control characters up front.
+    bool hasBadChar = (cleanPath[0] != '/' || cleanPath.find("..") != std::string::npos ||
+                       cleanPath.find('\\') != std::string::npos || cleanPath.find('%') != std::string::npos);
+
+    for (char rawCh : cleanPath)
+    {
+        unsigned char ch = static_cast<unsigned char>(rawCh);
+
+        if (ch < 0x20u || ch == 0x7Fu)
+        {
+            hasBadChar = true;
+            break;
+        }
+    }
+
+    if (hasBadChar)
     {
         static constexpr char kBad[] = "400 Bad Request\n";
 
@@ -519,7 +556,7 @@ void WsServer::AcceptIncoming(int aListenFd, bool aIsUnix)
             break;
         }
 
-        if (!SetNonBlocking(clientFd))
+        if (mClients.size() >= kMaxClients || !SetNonBlocking(clientFd))
         {
             ::close(clientFd);
             continue;
@@ -647,8 +684,9 @@ void WsServer::ProcessHttp(Connection &aConn)
         std::string wsVer   = headers["sec-websocket-version"];
         std::string wsKey   = headers["sec-websocket-key"];
         std::string origin  = headers["origin"];
+        std::string hostHdr = headers["host"];
 
-        if (!IsOriginAllowed(origin))
+        if (!IsOriginAllowed(origin, hostHdr))
         {
             static constexpr char kForb[] = "403 Forbidden Origin\n";
 
@@ -741,6 +779,14 @@ void WsServer::ProcessWebSocket(Connection &aConn)
             return;
         }
 
+        // RFC 6455 Section 5.5: control frames MUST NOT be fragmented and MUST have payload <= 125 bytes.
+        if (opcode >= 0x08u && (!fin || payloadLn > 125u))
+        {
+            QueueWsFrame(aConn, 0x08u, nullptr, 0);
+            aConn.mCloseAfterTx = true;
+            return;
+        }
+
         size_t totalFrame = headerLen + 4u + static_cast<size_t>(payloadLn);
 
         if (aConn.mRxBuf.size() < totalFrame)
@@ -784,7 +830,7 @@ void WsServer::ProcessWebSocket(Connection &aConn)
         }
         else if (opcode == 0x00u)
         {
-            if (aConn.mWsFragment.size() + payload.size() > kMaxWsFrameBytes)
+            if (aConn.mWsFragOpcode == 0 || aConn.mWsFragment.size() + payload.size() > kMaxWsFrameBytes)
             {
                 aConn.mState = ConnState::kClosing;
                 return;

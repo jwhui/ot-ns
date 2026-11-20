@@ -399,12 +399,14 @@ class OtnsSession:
         speed: float = 0.0,
         output_dir: str | Path | None = None,
         use_unix_rpc: bool = False,
+        enable_rfsim: bool = False,
     ) -> None:
         self._otns_bin = str(otns_bin)
         self._seed = seed
         self._rf_model = rf_model
         self._speed = speed
         self._use_unix_rpc = use_unix_rpc
+        self._enable_rfsim = enable_rfsim
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
         if output_dir is None:
             self._temp_dir = tempfile.TemporaryDirectory(prefix="otns_v3_py_")
@@ -415,6 +417,7 @@ class OtnsSession:
         self._proc: subprocess.Popen[str] | None = None
         self.http_port: int = 0
         self.rpc_socket_path: Path | None = None
+        self.rfsim_socket_path: Path | None = None
         self.client: OtnsClient | None = None
 
     def __enter__(self) -> OtnsClient:
@@ -437,6 +440,9 @@ class OtnsSession:
         if self._use_unix_rpc:
             self.rpc_socket_path = self.output_dir / "rpc.sock"
             cmd.extend(["--rpc-socket", str(self.rpc_socket_path)])
+        if self._enable_rfsim:
+            self.rfsim_socket_path = self.output_dir / "rfsim.sock"
+            cmd.extend(["--rfsim-socket", str(self.rfsim_socket_path)])
 
         self._proc = subprocess.Popen(
             cmd,

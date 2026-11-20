@@ -1,0 +1,13 @@
+.git
+.github
+build
+build-*
+otns_out
+web/node_modules
+web/dist
+python/**/__pycache__
+script/__pycache__
+*.pcap
+*.pcapng
+*.jsonl
+*.pyc

@@ -50,5 +50,13 @@ OTNS v3 addresses all four via a ground-up **C++17** architecture with **layered
 - **Milestone 1 (Complete)**: `v3` branch & RFC docs, CMake C++17 build with OpenThread host-C++ style & ASan/UBSan, `libotns_rf`, `libotns_protocol` binary/TLV codec, `libotns` scheduler + in-process multi-instance OpenThread nodes, multi-node formation/ping tests, and 100-node scale benchmark.
 - **Milestone 2 (Complete)**: `ot-rfsim` v3 platform (`openthread-rfsim-v3` library mode + `ot-cli-ftd-rfsim` standalone binary), `RfSimServer`/`RfSimNode` Unix & TCP socket bridge with lock-step virtual time, real-time clock pacing, virtual TREL/Infra-If/Host UDP fabric, PCAP/WPAN-TAP writer, 802.15.4 dissector, KPI JSON tracker, JSON topology save/load with output path containment, and hybrid in-process + external node tests.
 - **Milestone 3 (Complete)**: Embedded localhost HTTP/1.1 + RFC 6455 WebSocket + Unix JSON-RPC server (`otns_server`), v1 JSON-RPC control plane, coalesced `VizPublisher`, JSONL recorder/replayer, interactive `otns` daemon & REPL, Vite + TypeScript batched Canvas 2D web visualizer (build-time embedded via `-DOTNS_BUILD_WEB=ON`), and zero-dep typed Python 3 SDK + 200-node scale test suite.
-- **Milestone 4 (Next)**: Cross-platform CI (Linux x86_64/arm64, macOS Apple Silicon, ASan/UBSan), Docker playground, Matter & OTBR smoke tests, Nexus WebSocket observer PR in `openthread`, community cutover.
-- **Phase 2 (Post-MVP)**: Energy profiling & charts, optional YAML topology loader, legacy OT v1.1–1.3 build matrix.
+- **Milestone 4 (Complete)**: Cross-platform GitHub Actions CI (Linux x86_64/arm64, macOS 15, GCC/Clang ASan+UBSan, `make-pretty` formatting, standalone `ot-rfsim` build, Vite build, Python SDK + examples), hardened multi-stage Docker playground (`docker/Dockerfile`), live daemon ↔ standalone single-instance `ot-rfsim` v3 hybrid verification, and security audit.
+- **Follow-ups (Post-MVP)**: Connect `openthread/tests/nexus` to the shared `viz_rpc_v1.schema.json` WebSocket observer + `web/` visualizer; optional energy profiling & charts, YAML topology importer, and multi-version OT build matrix.
+
+---
+
+## 5. Verified Performance & Footprint (Release Build, Linux x86_64)
+
+- **100-node C++ benchmark (`bench_scale 100 30`, `MutualInterference`)**: 30 s simulated time in ~0.22 s wall time (~136× real time), bit-for-bit deterministic across fresh runs and `Simulation::Reset()`.
+- **200-node Python SDK scale test (`scale_200.py`, `Midisc`)**: 60 s simulated time in ~0.69 s wall time (~86× real time), converging cleanly to 1 Leader, 23 Routers, 176 Children, 0 Detached, 1 Partition.
+- **Single-binary footprint**: `otns` Release binary (~2.4 MB) embeds the full Vite + TypeScript Canvas 2D bundle (17.8 KB JS, 4.5 KB CSS, zero runtime npm dependencies); standalone `openthread-rfsim-v3` static library (~99 KB) links cleanly against single-instance OpenThread builds.

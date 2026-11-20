@@ -316,9 +316,11 @@ int main(int aArgc, char *aArgv[])
     {
         otns::Core::TopologySpec spec;
         std::string              err;
+        std::filesystem::path    topoFile(topologyPath);
+        std::filesystem::path    topoBase =
+            topoFile.parent_path().empty() ? std::filesystem::current_path() : topoFile.parent_path();
 
-        if (!otns::Core::LoadTopologyFileContained(std::filesystem::path(topologyPath).parent_path(),
-                                                   std::filesystem::path(topologyPath).filename().string(), spec, err))
+        if (!otns::Core::LoadTopologyFileContained(topoBase, topoFile.filename().string(), spec, err))
         {
             std::cerr << "Failed to load topology: " << err << "\n";
             return 1;
@@ -330,6 +332,10 @@ int main(int aArgc, char *aArgv[])
     if (!rpcSocket.empty())
     {
         std::cout << "OTNS_RPC_SOCKET=" << rpcSocket << "\n";
+    }
+    if (rfsimServer.IsListening())
+    {
+        std::cout << "OTNS_RFSIM_ENDPOINT=" << rfsimServer.GetEndpoint() << "\n";
     }
     std::cout << "OTNS v3 listening on http://" << bindAddr << ":" << wsServer.GetHttpPort() << "\n" << std::flush;
 
@@ -350,6 +356,16 @@ int main(int aArgc, char *aArgv[])
         int  pollMs     = rpc.IsPaused() ? 25 : 5;
 
         wsServer.PollOnce(pollMs, replFd, &stdinReady);
+
+        if (rfsimServer.IsListening())
+        {
+            otns::Core::NodeConfig extCfg;
+
+            while (rfsimServer.AcceptExternalNode(extCfg, 0) != otns::Rf::kInvalidNodeId)
+            {
+                viz.PublishDiffIfDue(rpc.IsPaused(), true);
+            }
+        }
 
         if (stdinReady && replFd >= 0)
         {
