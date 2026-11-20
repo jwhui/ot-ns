@@ -19,6 +19,25 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+### Full Build with Embedded Web Visualizer
+
+Requires Node.js ≥ 20 (zero runtime JS dependencies; Vite + TypeScript bundle is compiled and embedded at build time and never committed to Git):
+
+```bash
+npm --prefix web install
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DOTNS_BUILD_WEB=ON
+cmake --build build-release
+./build-release/otns --port 8999
+```
+
+### Python 3 SDK & Scale Tests
+
+Zero external runtime dependencies (Python ≥ 3.10 stdlib):
+
+```bash
+OTNS_BIN=./build-release/otns python3 python/tests/test_otns_sdk.py
+```
+
 ## Code Style & Formatting
 
 OTNS v3 follows OpenThread's host-C++ style (`openthread/STYLE_GUIDE.md` naming, Allman braces, `-fno-exceptions -fno-rtti`, matching `ot-br-posix` and `tests/nexus`) using the repository's `.clang-format` rules:

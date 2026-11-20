@@ -85,6 +85,7 @@ public:
     const RadioModelParams &GetParams(void) const { return mParams; }
 
     void ResetSeed(uint64_t aSeed);
+    void Clear(uint64_t aSeed);
     void AdvanceTime(uint64_t aNowUs);
 
     void                  AddNode(const RadioNodeState &aNode);

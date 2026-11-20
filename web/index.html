@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OTNS v3 — OpenThread Network Visualizer</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <header class="toolbar">
+    <div class="toolbar-group">
+      <span class="brand">OTNS v3</span>
+      <span id="conn-badge" class="badge badge-offline">Disconnected</span>
+      <span id="engine-label" class="meta-text">engine: —</span>
+      <span id="clock-label" class="clock">00:00.000</span>
+    </div>
+
+    <div class="toolbar-group">
+      <button id="btn-play" class="btn btn-primary" type="button">Play</button>
+      <button id="btn-step-1s" class="btn" type="button">+1s</button>
+      <button id="btn-step-10s" class="btn" type="button">+10s</button>
+      <label class="select-wrap">
+        <span>Speed</span>
+        <select id="speed-select">
+          <option value="0.25">0.25×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="5">5×</option>
+          <option value="20">20×</option>
+          <option value="0">Max</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="toolbar-group">
+      <select id="add-type-select" aria-label="Node type">
+        <option value="router">Router</option>
+        <option value="fed">FED</option>
+        <option value="med">MED</option>
+        <option value="sed">SED</option>
+      </select>
+      <button id="btn-add-node" class="btn" type="button">+ Node</button>
+      <button id="btn-fit" class="btn" type="button">Fit</button>
+      <button id="btn-ranges" class="btn" type="button">Ranges</button>
+      <label class="btn file-btn">
+        Load Replay
+        <input id="replay-file-input" type="file" accept=".jsonl,.json" hidden />
+      </label>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="canvas-pane">
+      <canvas id="topology-canvas"></canvas>
+      <div id="replay-bar" class="replay-bar hidden">
+        <button id="btn-replay-toggle" class="btn btn-primary" type="button">Play</button>
+        <input id="replay-scrubber" type="range" min="0" max="100" value="0" />
+        <span id="replay-time" class="clock">0.0s / 0.0s</span>
+        <button id="btn-replay-exit" class="btn" type="button">Live</button>
+      </div>
+      <div class="legend">
+        <span><i class="dot dot-leader"></i>Leader</span>
+        <span><i class="dot dot-router"></i>Router</span>
+        <span><i class="dot dot-child"></i>Child</span>
+        <span><i class="dot dot-detached"></i>Detached</span>
+        <span><i class="dot dot-ext"></i>External (ot-rfsim)</span>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Network Stats</h2>
+        <div class="stats-grid">
+          <div class="stat"><span class="stat-label">Nodes</span><span id="st-total" class="stat-val">0</span></div>
+          <div class="stat"><span class="stat-label">Leaders</span><span id="st-leaders" class="stat-val c-leader">0</span></div>
+          <div class="stat"><span class="stat-label">Routers</span><span id="st-routers" class="stat-val c-router">0</span></div>
+          <div class="stat"><span class="stat-label">Children</span><span id="st-children" class="stat-val c-child">0</span></div>
+          <div class="stat"><span class="stat-label">Detached</span><span id="st-detached" class="stat-val c-detached">0</span></div>
+          <div class="stat"><span class="stat-label">Partitions</span><span id="st-partitions" class="stat-val">0</span></div>
+        </div>
+        <canvas id="stats-canvas" width="300" height="110"></canvas>
+      </section>
+
+      <section class="panel inspector-panel">
+        <h2>Node Inspector</h2>
+        <div id="node-details" class="details-box">Click a node on the canvas to inspect, drag to move, or run OpenThread CLI commands.</div>
+        <div id="node-actions" class="action-row hidden">
+          <button id="btn-node-toggle" class="btn" type="button">Disable</button>
+          <button id="btn-node-remove" class="btn btn-danger" type="button">Remove</button>
+        </div>
+        <form id="cli-form" class="cli-form hidden">
+          <input id="cli-input" type="text" placeholder="ot cli (e.g. state, ipaddr, neighbor table)" autocomplete="off" />
+          <button class="btn btn-primary" type="submit">Send</button>
+        </form>
+        <pre id="cli-output" class="cli-output"></pre>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

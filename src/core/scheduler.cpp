@@ -50,7 +50,7 @@ EventId Scheduler::ScheduleAfter(uint64_t aDelayUs, Callback aCallback)
 
 void Scheduler::Cancel(EventId aId)
 {
-    if (aId != kInvalidEventId)
+    if (aId != kInvalidEventId && aId < mNextId)
     {
         mCanceled.insert(aId);
     }

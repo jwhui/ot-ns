@@ -395,6 +395,31 @@ Core::NodeSnapshot InProcNode::GetSnapshot(void) const
                           ext->m8[3], ext->m8[4], ext->m8[5], ext->m8[6], ext->m8[7]);
             snap.mExtAddr = hex;
         }
+
+        if (snap.mRole == Core::DeviceRole::kChild)
+        {
+            otRouterInfo parentInfo;
+
+            std::memset(&parentInfo, 0, sizeof(parentInfo));
+            if (otThreadGetParentInfo(mOtInstance, &parentInfo) == OT_ERROR_NONE)
+            {
+                snap.mParentRloc16 = parentInfo.mRloc16;
+            }
+        }
+
+        otNeighborInfoIterator iter = OT_NEIGHBOR_INFO_ITERATOR_INIT;
+        otNeighborInfo         ninfo;
+
+        while (otThreadGetNextNeighborInfo(mOtInstance, &iter, &ninfo) == OT_ERROR_NONE)
+        {
+            Core::NeighborLinkSnapshot link;
+
+            link.mRloc16  = ninfo.mRloc16;
+            link.mRssiDbm = ninfo.mAverageRssi;
+            link.mLqi     = ninfo.mLinkQualityIn;
+            link.mIsChild = ninfo.mIsChild;
+            snap.mNeighbors.push_back(link);
+        }
     }
 
     return snap;

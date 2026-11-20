@@ -66,10 +66,42 @@ Simulation::~Simulation(void)
     ScopedCurrentSim guard(this);
 
     mPcapWriter.Close();
-    mScheduler.Clear();
-    mNetFabric.Clear();
     mNodes.clear();
     mNodeConfigs.clear();
+    mScheduler.Clear();
+    mNetFabric.Clear();
+}
+
+void Simulation::Reset(std::optional<uint64_t> aSeed)
+{
+    ScopedCurrentSim guard(this);
+
+    // Destroy nodes BEFORE clearing the scheduler so node destructors canceling
+    // old alarms do not pollute the reset scheduler's canceled-ID set.
+    mNodes.clear();
+    mNodeConfigs.clear();
+    mScheduler.Clear();
+    mNetFabric.Clear();
+    mKpiTracker.Reset();
+    mNextNodeId         = 1;
+    mHasPendingTasklets = false;
+    mStatTxFrames       = 0;
+    mStatRxOk           = 0;
+    mStatRxFcsErr       = 0;
+
+    if (aSeed.has_value())
+    {
+        mConfig.mSeed = *aSeed;
+    }
+
+    mRadioModel.Clear(mConfig.mSeed);
+    mPlatformPrng.Seed(mConfig.mSeed ^ 0xA5A55A5AF0F00F0FULL);
+}
+
+void Simulation::SetRfPreset(Rf::RadioModelPreset aPreset)
+{
+    mConfig.mRfPreset = aPreset;
+    mRadioModel.SetPreset(aPreset);
 }
 
 Rf::NodeId Simulation::AllocateNodeId(Rf::NodeId aPreferredId)
@@ -415,15 +447,7 @@ bool Simulation::LoadTopology(const TopologySpec &aSpec)
 {
     ScopedCurrentSim guard(this);
 
-    mScheduler.Clear();
-    mNetFabric.Clear();
-    mNodes.clear();
-    mNodeConfigs.clear();
-    mKpiTracker.Reset();
-    mNextNodeId   = 1;
-    mStatTxFrames = 0;
-    mStatRxOk     = 0;
-    mStatRxFcsErr = 0;
+    Reset(aSpec.mSeed);
 
     mConfig.mSeed       = aSpec.mSeed;
     mConfig.mRfPreset   = aSpec.mRfPreset;
@@ -431,7 +455,6 @@ bool Simulation::LoadTopology(const TopologySpec &aSpec)
     mConfig.mChannel    = aSpec.mChannel;
     mConfig.mNetworkKey = aSpec.mNetworkKey;
 
-    mRadioModel.ResetSeed(aSpec.mSeed);
     mRadioModel.SetPreset(aSpec.mRfPreset);
     if (aSpec.mRadioParams.has_value())
     {
@@ -645,6 +668,35 @@ void Simulation::StartRadioTx(Rf::NodeId      aSrcId,
         if (mPcapWriter.IsOpen())
         {
             (void)mPcapWriter.AppendFrame(frameWithTs);
+        }
+
+        if (mPacketObserver)
+        {
+            PacketObservation obs;
+
+            obs.mTimestampUs = frameWithTs.mTimestampUs;
+            obs.mSrcId       = aSrcId;
+            obs.mDstId       = Rf::kInvalidNodeId;
+            obs.mChannel     = frameWithTs.mChannel;
+            obs.mDurationUs  = txDurUs;
+            obs.mRssiDbm     = frameWithTs.mRssiDbm;
+            obs.mFrameLen    = static_cast<uint16_t>(frameWithTs.mPsdu.size());
+            obs.mProtocol    = (macInfo.mFrameType == MacFrameType::kAck) ? "802.15.4-ACK" : "802.15.4";
+            obs.mSummary     = macInfo.ToSummaryString();
+
+            if (macInfo.mValid && !macInfo.IsBroadcast() && macInfo.mDstAddrMode == MacAddrMode::kShort)
+            {
+                for (const auto &pair : mNodes)
+                {
+                    if (pair.first != aSrcId && pair.second->GetSnapshot().mRloc16 == macInfo.mDstAddrShort)
+                    {
+                        obs.mDstId = pair.first;
+                        break;
+                    }
+                }
+            }
+
+            mPacketObserver(obs);
         }
 
         mScheduler.ScheduleAfter(txDurUs, [this, aSrcId, frameWithTs = std::move(frameWithTs), aAckRequested,

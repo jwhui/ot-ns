@@ -70,17 +70,27 @@ struct NodeConfig
     bool           mAutoStart  = true;
 };
 
+struct NeighborLinkSnapshot
+{
+    uint16_t mRloc16  = 0xFFFE;
+    int8_t   mRssiDbm = Rf::kRssiInvalidInt8;
+    uint8_t  mLqi     = 0;
+    bool     mIsChild = false;
+};
+
 struct NodeSnapshot
 {
-    Rf::NodeId     mId          = Rf::kInvalidNodeId;
-    NodeKind       mKind        = NodeKind::kInProc;
-    Rf::Position3D mPos         = {};
-    double         mRadioRange  = Rf::kDefaultRadioRange;
-    DeviceRole     mRole        = DeviceRole::kDisabled;
-    uint16_t       mRloc16      = 0xFFFE;
-    uint32_t       mPartitionId = 0;
-    std::string    mExtAddr;
-    bool           mEnabled = true;
+    Rf::NodeId                        mId           = Rf::kInvalidNodeId;
+    NodeKind                          mKind         = NodeKind::kInProc;
+    Rf::Position3D                    mPos          = {};
+    double                            mRadioRange   = Rf::kDefaultRadioRange;
+    DeviceRole                        mRole         = DeviceRole::kDisabled;
+    uint16_t                          mRloc16       = 0xFFFE;
+    uint16_t                          mParentRloc16 = 0xFFFE;
+    uint32_t                          mPartitionId  = 0;
+    std::string                       mExtAddr;
+    bool                              mEnabled = true;
+    std::vector<NeighborLinkSnapshot> mNeighbors;
 };
 
 struct RawFrame

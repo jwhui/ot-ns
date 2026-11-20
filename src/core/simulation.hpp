@@ -74,6 +74,19 @@ struct SimulationStats
     uint64_t mRxFcsErr   = 0;
 };
 
+struct PacketObservation
+{
+    uint64_t      mTimestampUs = 0;
+    Rf::NodeId    mSrcId       = Rf::kInvalidNodeId;
+    Rf::NodeId    mDstId       = Rf::kInvalidNodeId; // 0 = broadcast / unknown
+    Rf::ChannelId mChannel     = Rf::kMinChannel;
+    uint64_t      mDurationUs  = 0;
+    int8_t        mRssiDbm     = Rf::kRssiInvalidInt8;
+    uint16_t      mFrameLen    = 0;
+    std::string   mProtocol;
+    std::string   mSummary;
+};
+
 /**
  * Single-threaded deterministic hybrid Thread network simulator.
  */
@@ -82,12 +95,17 @@ class Simulation
 public:
     using TxDoneCallback         = std::function<void(const std::optional<RawFrame> &aAck, uint8_t aOtError)>;
     using EnergyScanDoneCallback = std::function<void(int8_t aPeakRssiDbm)>;
+    using PacketObserver         = std::function<void(const PacketObservation &aPacket)>;
 
     explicit Simulation(const SimulationConfig &aConfig = {});
     ~Simulation(void);
 
     Simulation(const Simulation &)            = delete;
     Simulation &operator=(const Simulation &) = delete;
+
+    void Reset(std::optional<uint64_t> aSeed = std::nullopt);
+    void SetRfPreset(Rf::RadioModelPreset aPreset);
+    void SetPacketObserver(PacketObserver aObserver) { mPacketObserver = std::move(aObserver); }
 
     Rf::NodeId                  AddNode(const NodeConfig &aConfig = {});
     Rf::NodeId                  RegisterExternalNode(std::unique_ptr<SimNode> aNode, const NodeConfig &aConfig);
@@ -183,6 +201,7 @@ private:
     uint64_t                                       mStatRxFcsErr       = 0;
     std::map<Rf::NodeId, NodeConfig>               mNodeConfigs;
     std::map<Rf::NodeId, std::unique_ptr<SimNode>> mNodes;
+    PacketObserver                                 mPacketObserver;
 };
 
 } // namespace Core

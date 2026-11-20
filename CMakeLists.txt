@@ -45,6 +45,8 @@ option(OTNS_BUILD_WEB "Build and embed web visualizer assets (requires Node.js)"
 option(OTNS_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(OTNS_WERROR "Treat compiler warnings as errors on OTNS targets" ON)
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
 # Common compiler warning / sanitizer / OpenThread C++ flags for OTNS-owned targets
 add_library(otns_build_options INTERFACE)
 target_compile_options(otns_build_options INTERFACE
@@ -186,14 +188,69 @@ target_link_libraries(otns_core
 )
 
 # -----------------------------------------------------------------------------
-# 5. ot-rfsim v3 External Node Platform Library & Standalone CLI Node Binary
+# 5. Embedded HTTP/1.1 + WebSocket Server, VizPublisher, RPC, Replay & otns CLI
+# -----------------------------------------------------------------------------
+set(OTNS_GENERATED_WEB_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_web_assets.cpp")
+
+if(OTNS_BUILD_WEB)
+    find_program(NPM_EXECUTABLE npm REQUIRED)
+    file(GLOB_RECURSE OTNS_WEB_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/web/index.html"
+        "${CMAKE_CURRENT_SOURCE_DIR}/web/src/*"
+        "${CMAKE_CURRENT_SOURCE_DIR}/web/package.json"
+        "${CMAKE_CURRENT_SOURCE_DIR}/web/vite.config.ts"
+    )
+    add_custom_command(
+        OUTPUT "${OTNS_GENERATED_WEB_CPP}"
+        COMMAND "${NPM_EXECUTABLE}" run build
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/script/embed_web_assets.py"
+                --dist "${CMAKE_CURRENT_SOURCE_DIR}/web/dist"
+                --out "${OTNS_GENERATED_WEB_CPP}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/web"
+        DEPENDS ${OTNS_WEB_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/script/embed_web_assets.py"
+        COMMENT "Building Vite web visualizer and generating embedded C++ assets"
+    )
+else()
+    add_custom_command(
+        OUTPUT "${OTNS_GENERATED_WEB_CPP}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/script/embed_web_assets.py"
+                --out "${OTNS_GENERATED_WEB_CPP}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/script/embed_web_assets.py"
+        COMMENT "Generating headless fallback embedded web asset (OTNS_BUILD_WEB=OFF)"
+    )
+endif()
+
+add_library(otns_server STATIC
+    src/server/sha1_base64.cpp
+    src/server/ws_server.cpp
+    src/server/replay.cpp
+    src/server/viz_publisher.cpp
+    src/server/rpc_handler.cpp
+    src/cli/repl.cpp
+    "${OTNS_GENERATED_WEB_CPP}"
+)
+target_include_directories(otns_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(otns_server
+    PUBLIC
+        otns_core
+    PRIVATE
+        otns_build_options
+)
+
+add_executable(otns
+    src/cli/main.cpp
+)
+target_link_libraries(otns PRIVATE otns_server otns_build_options)
+
+# -----------------------------------------------------------------------------
+# 6. ot-rfsim v3 External Node Platform Library & Standalone CLI Node Binary
 # -----------------------------------------------------------------------------
 if(OTNS_BUILD_RFSIM)
     add_subdirectory(ot-rfsim)
 endif()
 
 # -----------------------------------------------------------------------------
-# 6. Tests (CTest + doctest)
+# 7. Tests (CTest + doctest)
 # -----------------------------------------------------------------------------
 if(OTNS_BUILD_TESTS)
     enable_testing()
@@ -225,6 +282,13 @@ if(OTNS_BUILD_TESTS)
     )
     target_link_libraries(test_core_features PRIVATE otns_core otns_doctest otns_build_options)
     add_test(NAME test_core_features COMMAND test_core_features)
+
+    add_executable(test_server_rpc
+        tests/test_main.cpp
+        tests/test_server_rpc.cpp
+    )
+    target_link_libraries(test_server_rpc PRIVATE otns_server otns_doctest otns_build_options)
+    add_test(NAME test_server_rpc COMMAND test_server_rpc)
 
     if(OTNS_BUILD_RFSIM)
         add_executable(test_rfsim_hybrid

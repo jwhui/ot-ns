@@ -175,3 +175,64 @@ TEST_CASE("Deterministic reproducibility across identical seeded simulations")
         }
     }
 }
+
+TEST_CASE("Simulation::Reset restores bit-for-bit identical determinism after active traffic")
+{
+    auto populateAndRun = [](Simulation &aSim) {
+        aSim.SetRfPreset(RadioModelPreset::kMidisc);
+        for (int i = 0; i < 8; ++i)
+        {
+            NodeType type = (i % 2 == 0) ? NodeType::kRouter : NodeType::kMed;
+
+            aSim.AddNode(
+                {type, {static_cast<double>(i % 4) * 35.0, static_cast<double>(i / 4) * 35.0, 0.0}, 160.0, true});
+        }
+        aSim.AdvanceSec(25.0);
+        return aSim.GetStats();
+    };
+
+    SimulationStats freshStats;
+    {
+        SimulationConfig freshCfg;
+
+        freshCfg.mSeed     = 4242;
+        freshCfg.mRfPreset = RadioModelPreset::kMidisc;
+
+        Simulation freshSim(freshCfg);
+
+        freshStats = populateAndRun(freshSim);
+    }
+
+    SimulationStats resetStats;
+    {
+        SimulationConfig dirtyCfg;
+
+        dirtyCfg.mSeed     = 2026;
+        dirtyCfg.mRfPreset = RadioModelPreset::kMutualInterference;
+
+        Simulation dirtySim(dirtyCfg);
+
+        for (int i = 0; i < 10; ++i)
+        {
+            dirtySim.AddNode({NodeType::kRouter, {static_cast<double>(i) * 20.0, 0.0, 0.0}, 150.0, true});
+        }
+        dirtySim.AdvanceSec(28.0);
+        (void)dirtySim.ExecuteCli(1, "ping ff02::1");
+        dirtySim.AdvanceUs(1000); // Stop mid-flight with active alarms & in-flight radio events
+
+        dirtySim.Reset(4242);
+        resetStats = populateAndRun(dirtySim);
+    }
+
+    CHECK(freshStats.mLeaders == 1);
+    CHECK(freshStats.mPartitions == 1);
+    CHECK(freshStats.mDetached == 0);
+    CHECK(resetStats.mLeaders == freshStats.mLeaders);
+    CHECK(resetStats.mRouters == freshStats.mRouters);
+    CHECK(resetStats.mChildren == freshStats.mChildren);
+    CHECK(resetStats.mDetached == freshStats.mDetached);
+    CHECK(resetStats.mPartitions == freshStats.mPartitions);
+    CHECK(resetStats.mTxFrames == freshStats.mTxFrames);
+    CHECK(resetStats.mRxOk == freshStats.mRxOk);
+    CHECK(resetStats.mRxFcsErr == freshStats.mRxFcsErr);
+}

@@ -67,6 +67,17 @@ void RadioModel::ResetSeed(uint64_t aSeed)
     mFading.Reset(aSeed);
 }
 
+void RadioModel::Clear(uint64_t aSeed)
+{
+    mNodes.clear();
+    mSpatial.Clear();
+    mActiveTx.clear();
+    mActiveTxByCh.clear();
+    mActiveScanByCh.clear();
+    mNowUs = 0;
+    ResetSeed(aSeed);
+}
+
 void RadioModel::AdvanceTime(uint64_t aNowUs)
 {
     mNowUs = aNowUs;
