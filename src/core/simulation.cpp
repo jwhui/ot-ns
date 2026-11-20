@@ -30,9 +30,13 @@
 
 #include <openthread/error.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <set>
+#include <thread>
 
+#include "core/wpan_dissector.hpp"
 #include "nodes/inproc_node.hpp"
 
 namespace otns {
@@ -40,10 +44,11 @@ namespace Core {
 
 namespace {
 
-static constexpr uint64_t kUsPerByte250Kbps = 32;   // 250 kbps => 4 us/bit => 32 us/byte
-static constexpr uint64_t kCcaDurationUs    = 128;  // 8 symbols * 16 us
-static constexpr uint64_t kAckTurnaroundUs  = 192;  // aTurnaroundTime = 12 symbols * 16 us
-static constexpr uint64_t kAckWaitTimeoutUs = 1000; // macAckWaitDuration
+static constexpr uint64_t kUsPerByte250Kbps = 32;    // 250 kbps => 4 us/bit => 32 us/byte
+static constexpr uint64_t kCcaDurationUs    = 128;   // 8 symbols * 16 us
+static constexpr uint64_t kAckTurnaroundUs  = 192;   // aTurnaroundTime = 12 symbols * 16 us
+static constexpr uint64_t kAckWaitTimeoutUs = 1000;  // macAckWaitDuration
+static constexpr uint64_t kPacedSliceUs     = 10000; // 10 ms virtual slice for real-time pacing
 
 } // namespace
 
@@ -60,14 +65,36 @@ Simulation::~Simulation(void)
 {
     ScopedCurrentSim guard(this);
 
+    mPcapWriter.Close();
     mScheduler.Clear();
+    mNetFabric.Clear();
     mNodes.clear();
+    mNodeConfigs.clear();
+}
+
+Rf::NodeId Simulation::AllocateNodeId(Rf::NodeId aPreferredId)
+{
+    if (aPreferredId != Rf::kInvalidNodeId && mNodes.find(aPreferredId) == mNodes.end())
+    {
+        if (aPreferredId >= mNextNodeId)
+        {
+            mNextNodeId = aPreferredId + 1;
+        }
+        return aPreferredId;
+    }
+
+    while (mNodes.find(mNextNodeId) != mNodes.end())
+    {
+        mNextNodeId += 1;
+    }
+
+    return mNextNodeId++;
 }
 
 Rf::NodeId Simulation::AddNode(const NodeConfig &aConfig)
 {
     ScopedCurrentSim   guard(this);
-    Rf::NodeId         id = mNextNodeId++;
+    Rf::NodeId         id = AllocateNodeId();
     Rf::RadioNodeState radioNode;
 
     radioNode.mId               = id;
@@ -79,10 +106,49 @@ Rf::NodeId Simulation::AddNode(const NodeConfig &aConfig)
     radioNode.mState            = Rf::RadioState::kDisabled;
 
     mRadioModel.AddNode(radioNode);
+    mNodeConfigs[id] = aConfig;
 
     auto node = std::make_unique<Nodes::InProcNode>(*this, id, aConfig);
 
     mNodes.emplace(id, std::move(node));
+    DrainTasklets();
+
+    return id;
+}
+
+Rf::NodeId Simulation::RegisterExternalNode(std::unique_ptr<SimNode> aNode, const NodeConfig &aConfig)
+{
+    ScopedCurrentSim guard(this);
+
+    if (!aNode)
+    {
+        return Rf::kInvalidNodeId;
+    }
+
+    Rf::NodeId         id = aNode->GetId();
+    Rf::RadioNodeState radioNode;
+
+    if (id == Rf::kInvalidNodeId || mNodes.find(id) != mNodes.end())
+    {
+        return Rf::kInvalidNodeId;
+    }
+
+    if (id >= mNextNodeId)
+    {
+        mNextNodeId = id + 1;
+    }
+
+    radioNode.mId               = id;
+    radioNode.mPos              = aConfig.mPos;
+    radioNode.mRadioRange       = aConfig.mRadioRange;
+    radioNode.mChannel          = mConfig.mChannel;
+    radioNode.mTxPowerDbm       = Rf::kDefaultTxPowerDbm;
+    radioNode.mRxSensitivityDbm = Rf::kDefaultRxSensitivity;
+    radioNode.mState            = Rf::RadioState::kDisabled;
+
+    mRadioModel.AddNode(radioNode);
+    mNodeConfigs[id] = aConfig;
+    mNodes.emplace(id, std::move(aNode));
     DrainTasklets();
 
     return id;
@@ -98,7 +164,9 @@ bool Simulation::RemoveNode(Rf::NodeId aId)
         return false;
     }
 
+    mNetFabric.RemoveNode(aId);
     mRadioModel.RemoveNode(aId);
+    mNodeConfigs.erase(aId);
     mNodes.erase(it);
 
     return true;
@@ -115,6 +183,13 @@ bool Simulation::MoveNode(Rf::NodeId aId, Rf::Position3D aPos)
 
     it->second->SetPosition(aPos);
     mRadioModel.SetNodePosition(aId, aPos);
+
+    auto cit = mNodeConfigs.find(aId);
+
+    if (cit != mNodeConfigs.end())
+    {
+        cit->second.mPos = aPos;
+    }
 
     return true;
 }
@@ -195,6 +270,13 @@ std::vector<NodeSnapshot> Simulation::GetAllNodeSnapshots(void) const
     return snaps;
 }
 
+SimNode *Simulation::GetNode(Rf::NodeId aId)
+{
+    auto it = mNodes.find(aId);
+
+    return (it != mNodes.end()) ? it->second.get() : nullptr;
+}
+
 void Simulation::DrainTasklets(void)
 {
     while (mHasPendingTasklets)
@@ -234,13 +316,224 @@ void Simulation::AdvanceUs(uint64_t aDurationUs)
     mScheduler.SetNowUs(targetUs);
     mRadioModel.AdvanceTime(targetUs);
     DrainTasklets();
+
+    for (const auto &pair : mNodes)
+    {
+        mKpiTracker.RecordRoleObservation(pair.first, pair.second->GetSnapshot().mRole);
+    }
 }
 
 void Simulation::AdvanceSec(double aSeconds)
 {
     if (aSeconds > 0.0)
     {
-        AdvanceUs(static_cast<uint64_t>(std::llround(aSeconds * 1e6)));
+        uint64_t durUs = static_cast<uint64_t>(std::llround(aSeconds * 1e6));
+
+        if (mConfig.mSpeed > 0.0)
+        {
+            AdvancePacedUs(durUs, mConfig.mSpeed);
+        }
+        else
+        {
+            AdvanceUs(durUs);
+        }
+    }
+}
+
+void Simulation::AdvancePacedUs(uint64_t aDurationUs, double aSpeed)
+{
+    if (aSpeed <= 0.0 || aDurationUs == 0)
+    {
+        AdvanceUs(aDurationUs);
+        return;
+    }
+
+    auto     wallStart = std::chrono::steady_clock::now();
+    uint64_t elapsed   = 0;
+
+    while (elapsed < aDurationUs)
+    {
+        uint64_t stepUs = std::min(kPacedSliceUs, aDurationUs - elapsed);
+
+        AdvanceUs(stepUs);
+        elapsed += stepUs;
+
+        double targetWallUs = static_cast<double>(elapsed) / aSpeed;
+        auto   targetPoint  = wallStart + std::chrono::microseconds(static_cast<int64_t>(std::llround(targetWallUs)));
+        auto   now          = std::chrono::steady_clock::now();
+
+        if (targetPoint > now)
+        {
+            std::this_thread::sleep_until(targetPoint);
+        }
+    }
+}
+
+bool Simulation::StartPcapContained(const std::filesystem::path &aBaseDir,
+                                    const std::string           &aRequestedPath,
+                                    PcapFormat                   aFormat)
+{
+    return mPcapWriter.OpenContained(aBaseDir, aRequestedPath, aFormat);
+}
+
+void Simulation::StopPcap(void) { mPcapWriter.Close(); }
+
+TopologySpec Simulation::ExportTopology(void) const
+{
+    TopologySpec spec;
+
+    spec.mVersion     = 1;
+    spec.mSeed        = mConfig.mSeed;
+    spec.mRfPreset    = mConfig.mRfPreset;
+    spec.mPanId       = mConfig.mPanId;
+    spec.mChannel     = mConfig.mChannel;
+    spec.mNetworkKey  = mConfig.mNetworkKey;
+    spec.mRadioParams = mRadioModel.GetParams();
+
+    for (const auto &pair : mNodes)
+    {
+        TopologyNodeSpec nodeSpec;
+        NodeSnapshot     snap = pair.second->GetSnapshot();
+        auto             cit  = mNodeConfigs.find(pair.first);
+
+        nodeSpec.mId         = snap.mId;
+        nodeSpec.mKind       = snap.mKind;
+        nodeSpec.mPos        = snap.mPos;
+        nodeSpec.mRadioRange = snap.mRadioRange;
+        if (cit != mNodeConfigs.end())
+        {
+            nodeSpec.mType      = cit->second.mType;
+            nodeSpec.mAutoStart = cit->second.mAutoStart;
+        }
+        spec.mNodes.push_back(std::move(nodeSpec));
+    }
+
+    return spec;
+}
+
+bool Simulation::LoadTopology(const TopologySpec &aSpec)
+{
+    ScopedCurrentSim guard(this);
+
+    mScheduler.Clear();
+    mNetFabric.Clear();
+    mNodes.clear();
+    mNodeConfigs.clear();
+    mKpiTracker.Reset();
+    mNextNodeId   = 1;
+    mStatTxFrames = 0;
+    mStatRxOk     = 0;
+    mStatRxFcsErr = 0;
+
+    mConfig.mSeed       = aSpec.mSeed;
+    mConfig.mRfPreset   = aSpec.mRfPreset;
+    mConfig.mPanId      = aSpec.mPanId;
+    mConfig.mChannel    = aSpec.mChannel;
+    mConfig.mNetworkKey = aSpec.mNetworkKey;
+
+    mRadioModel.ResetSeed(aSpec.mSeed);
+    mRadioModel.SetPreset(aSpec.mRfPreset);
+    if (aSpec.mRadioParams.has_value())
+    {
+        mRadioModel.SetParams(*aSpec.mRadioParams);
+    }
+    mPlatformPrng.Seed(aSpec.mSeed ^ 0xA5A55A5AF0F00F0FULL);
+
+    for (const auto &ns : aSpec.mNodes)
+    {
+        if (ns.mKind != NodeKind::kInProc)
+        {
+            continue;
+        }
+
+        NodeConfig cfg;
+
+        cfg.mType       = ns.mType;
+        cfg.mPos        = ns.mPos;
+        cfg.mRadioRange = ns.mRadioRange;
+        cfg.mAutoStart  = ns.mAutoStart;
+
+        Rf::NodeId         id = AllocateNodeId(ns.mId);
+        Rf::RadioNodeState radioNode;
+
+        radioNode.mId               = id;
+        radioNode.mPos              = cfg.mPos;
+        radioNode.mRadioRange       = cfg.mRadioRange;
+        radioNode.mChannel          = mConfig.mChannel;
+        radioNode.mTxPowerDbm       = Rf::kDefaultTxPowerDbm;
+        radioNode.mRxSensitivityDbm = Rf::kDefaultRxSensitivity;
+        radioNode.mState            = Rf::RadioState::kDisabled;
+
+        mRadioModel.AddNode(radioNode);
+        mNodeConfigs[id] = cfg;
+
+        auto node = std::make_unique<Nodes::InProcNode>(*this, id, cfg);
+
+        mNodes.emplace(id, std::move(node));
+        DrainTasklets();
+
+        for (const auto &cmd : ns.mInitCommands)
+        {
+            (void)ExecuteCli(id, cmd);
+        }
+    }
+
+    return true;
+}
+
+void Simulation::SendTrelPacket(const NetPacket &aPacket)
+{
+    auto target = mNetFabric.ResolveTrelTarget(aPacket.mDstIp6, aPacket.mDstPort);
+
+    if (!target.has_value())
+    {
+        return;
+    }
+
+    Rf::NodeId dstId = *target;
+
+    mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = aPacket](void) {
+        auto it = mNodes.find(dstId);
+
+        if (it != mNodes.end() && it->second->IsEnabled())
+        {
+            it->second->OnTrelPacket(pkt);
+        }
+    });
+}
+
+void Simulation::SendInfraIfPacket(const NetPacket &aPacket)
+{
+    std::vector<Rf::NodeId> targets = mNetFabric.ResolveInfraIfTargets(aPacket.mSrcNodeId, aPacket.mDstIp6);
+
+    for (Rf::NodeId dstId : targets)
+    {
+        mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = aPacket](void) {
+            auto it = mNodes.find(dstId);
+
+            if (it != mNodes.end() && it->second->IsEnabled())
+            {
+                it->second->OnInfraIfPacket(pkt);
+            }
+        });
+    }
+}
+
+void Simulation::SendHostUdpPacket(const NetPacket &aPacket)
+{
+    std::vector<Rf::NodeId> targets =
+        mNetFabric.ResolveHostUdpTargets(aPacket.mSrcNodeId, aPacket.mDstIp6, aPacket.mDstPort);
+
+    for (Rf::NodeId dstId : targets)
+    {
+        mScheduler.ScheduleAfter(mNetFabric.GetBackboneDelayUs(), [this, dstId, pkt = aPacket](void) {
+            auto it = mNodes.find(dstId);
+
+            if (it != mNodes.end() && it->second->IsEnabled())
+            {
+                it->second->OnHostUdpPacket(pkt);
+            }
+        });
     }
 }
 
@@ -316,6 +609,7 @@ void Simulation::StartRadioTx(Rf::NodeId      aSrcId,
             if (chRssi >= static_cast<Rf::DbValue>(aCcaThresholdDbm))
             {
                 mRadioModel.SetNodeRadioState(aSrcId, Rf::RadioState::kRx, aTxFrame.mChannel);
+                mKpiTracker.RecordTxOutcome(aSrcId, aAckRequested, false, true);
                 if (cb)
                 {
                     cb(std::nullopt, static_cast<uint8_t>(OT_ERROR_CHANNEL_ACCESS_FAILURE));
@@ -342,6 +636,16 @@ void Simulation::StartRadioTx(Rf::NodeId      aSrcId,
         RawFrame frameWithTs = aTxFrame;
 
         frameWithTs.mTimestampUs = mScheduler.GetNowUs();
+        frameWithTs.mRssiDbm     = Rf::ClipRssiToInt8(aTxPowerDbm);
+
+        MacFrameInfo macInfo =
+            DissectWpanFrame(frameWithTs.mPsdu.data(), frameWithTs.mPsdu.size(), frameWithTs.mChannel);
+
+        mKpiTracker.RecordTxStart(aSrcId, frameWithTs.mPsdu.size(), txDurUs, macInfo);
+        if (mPcapWriter.IsOpen())
+        {
+            (void)mPcapWriter.AppendFrame(frameWithTs);
+        }
 
         mScheduler.ScheduleAfter(txDurUs, [this, aSrcId, frameWithTs = std::move(frameWithTs), aAckRequested,
                                            cb = std::move(cb)](void) mutable {
@@ -370,6 +674,7 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
         if (delivery.mStatus == Rf::RxResultStatus::kFcsError)
         {
             mStatRxFcsErr += 1;
+            mKpiTracker.RecordRxOutcome(delivery.mNodeId, aTxFrame.mPsdu.size(), false);
             continue;
         }
 
@@ -386,6 +691,7 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
         }
 
         mStatRxOk += 1;
+        mKpiTracker.RecordRxOutcome(delivery.mNodeId, aTxFrame.mPsdu.size(), true);
 
         RawFrame rxCopy = aTxFrame;
         RawFrame candidateAck;
@@ -406,6 +712,7 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
 
     if (!aAckRequested)
     {
+        mKpiTracker.RecordTxOutcome(aSrcId, false, false, false);
         if (aOnTxDone)
         {
             aOnTxDone(std::nullopt, static_cast<uint8_t>(OT_ERROR_NONE));
@@ -415,7 +722,8 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
 
     if (ackSenderId == Rf::kInvalidNodeId)
     {
-        mScheduler.ScheduleAfter(kAckWaitTimeoutUs, [cb = std::move(aOnTxDone)](void) {
+        mScheduler.ScheduleAfter(kAckWaitTimeoutUs, [this, aSrcId, cb = std::move(aOnTxDone)](void) {
+            mKpiTracker.RecordTxOutcome(aSrcId, true, false, false);
             if (cb)
             {
                 cb(std::nullopt, static_cast<uint8_t>(OT_ERROR_NO_ACK));
@@ -432,6 +740,7 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
 
         if (ait == mNodes.end() || !ait->second->IsEnabled())
         {
+            mKpiTracker.RecordTxOutcome(aSrcId, true, false, false);
             if (cb)
             {
                 cb(std::nullopt, static_cast<uint8_t>(OT_ERROR_NO_ACK));
@@ -446,6 +755,7 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
 
         if (ackStart.mAborted)
         {
+            mKpiTracker.RecordTxOutcome(aSrcId, true, false, false);
             if (cb)
             {
                 cb(std::nullopt, static_cast<uint8_t>(OT_ERROR_NO_ACK));
@@ -455,6 +765,15 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
 
         ackFrame.mChannel     = channel;
         ackFrame.mTimestampUs = mScheduler.GetNowUs();
+        ackFrame.mRssiDbm     = Rf::ClipRssiToInt8(ackPower);
+
+        MacFrameInfo ackMac = DissectWpanFrame(ackFrame.mPsdu.data(), ackFrame.mPsdu.size(), channel);
+
+        mKpiTracker.RecordTxStart(ackSenderId, ackFrame.mPsdu.size(), ackDurUs, ackMac);
+        if (mPcapWriter.IsOpen())
+        {
+            (void)mPcapWriter.AppendFrame(ackFrame);
+        }
 
         mScheduler.ScheduleAfter(ackDurUs, [this, aSrcId, ackSenderId, channel, ackFrame = std::move(ackFrame),
                                             cb = std::move(cb)](void) mutable {
@@ -478,6 +797,7 @@ void Simulation::CompleteRadioTx(Rf::NodeId      aSrcId,
                 }
             }
 
+            mKpiTracker.RecordTxOutcome(aSrcId, true, receivedAck.has_value(), false);
             if (cb)
             {
                 uint8_t err = receivedAck.has_value() ? static_cast<uint8_t>(OT_ERROR_NONE)

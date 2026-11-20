@@ -26,7 +26,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 #
 
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 
 project(ot-ns
     VERSION 3.0.0
@@ -40,6 +40,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(OTNS_BUILD_TESTS "Build OTNS v3 C++ unit and integration tests" ON)
+option(OTNS_BUILD_RFSIM "Build ot-rfsim v3 platform library and standalone CLI node binary" ON)
 option(OTNS_BUILD_WEB "Build and embed web visualizer assets (requires Node.js)" OFF)
 option(OTNS_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(OTNS_WERROR "Treat compiler warnings as errors on OTNS targets" ON)
@@ -98,7 +99,7 @@ target_include_directories(otns_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(otns_protocol PRIVATE otns_build_options)
 
 # -----------------------------------------------------------------------------
-# 3. Embedded OpenThread Multi-Instance Core (for In-Process Hybrid Nodes)
+# 3. Embedded OpenThread Multi-Instance Core (shared by in-process & ot-rfsim v3)
 # -----------------------------------------------------------------------------
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(OT_PLATFORM "external" CACHE STRING "" FORCE)
@@ -127,9 +128,17 @@ add_subdirectory(openthread EXCLUDE_FROM_ALL)
 # 4. Core Simulator Library (libotns)
 # -----------------------------------------------------------------------------
 add_library(otns_core STATIC
+    src/core/kpi_tracker.cpp
+    src/core/net_fabric.cpp
+    src/core/path_security.cpp
+    src/core/pcap_writer.cpp
     src/core/scheduler.cpp
     src/core/simulation.cpp
+    src/core/topology.cpp
+    src/core/wpan_dissector.cpp
     src/nodes/inproc_node.cpp
+    src/nodes/rfsim_node.cpp
+    src/nodes/rfsim_server.cpp
     openthread/examples/platforms/utils/mac_frame.cpp
 )
 target_include_directories(otns_core
@@ -158,29 +167,33 @@ target_include_directories(otns_inproc_platform
 target_link_libraries(otns_inproc_platform
     PRIVATE
         otns_build_options
+        otns_nlohmann_json
         ot-config
 )
-# OpenThread core calls into the external platform library (otPlat*)
-target_link_libraries(openthread-ftd PUBLIC otns_inproc_platform)
 
 target_link_libraries(otns_core
     PUBLIC
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,otns_inproc_platform>"
         otns_rf
         otns_protocol
         otns_nlohmann_json
         openthread-cli-ftd
         openthread-ftd
-        otns_inproc_platform
         ot-config
         mbedtls
     PRIVATE
         otns_build_options
 )
-# Break the static archive cycle cleanly on GNU ld
-target_link_libraries(otns_inproc_platform PUBLIC otns_core)
 
 # -----------------------------------------------------------------------------
-# 5. Tests (CTest + doctest)
+# 5. ot-rfsim v3 External Node Platform Library & Standalone CLI Node Binary
+# -----------------------------------------------------------------------------
+if(OTNS_BUILD_RFSIM)
+    add_subdirectory(ot-rfsim)
+endif()
+
+# -----------------------------------------------------------------------------
+# 6. Tests (CTest + doctest)
 # -----------------------------------------------------------------------------
 if(OTNS_BUILD_TESTS)
     enable_testing()
@@ -205,6 +218,26 @@ if(OTNS_BUILD_TESTS)
     )
     target_link_libraries(test_simulation PRIVATE otns_core otns_doctest otns_build_options)
     add_test(NAME test_simulation COMMAND test_simulation)
+
+    add_executable(test_core_features
+        tests/test_main.cpp
+        tests/test_core_features.cpp
+    )
+    target_link_libraries(test_core_features PRIVATE otns_core otns_doctest otns_build_options)
+    add_test(NAME test_core_features COMMAND test_core_features)
+
+    if(OTNS_BUILD_RFSIM)
+        add_executable(test_rfsim_hybrid
+            tests/test_main.cpp
+            tests/test_rfsim_hybrid.cpp
+        )
+        target_link_libraries(test_rfsim_hybrid PRIVATE otns_core otns_doctest otns_build_options)
+        target_compile_definitions(test_rfsim_hybrid PRIVATE
+            OTNS_RFSIM_CLI_BIN="$<TARGET_FILE:ot-cli-ftd-rfsim>"
+        )
+        add_dependencies(test_rfsim_hybrid ot-cli-ftd-rfsim)
+        add_test(NAME test_rfsim_hybrid COMMAND test_rfsim_hybrid)
+    endif()
 
     add_executable(bench_scale
         tests/bench_scale.cpp

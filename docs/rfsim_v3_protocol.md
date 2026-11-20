@@ -35,7 +35,7 @@ Every message on the stream consists of a 16-byte header followed by `payload_le
 
 - `payload_len`: Byte length of the TLV body (`0 <= payload_len <= 65536`). Decoders MUST reject frames exceeding `kMaxPayloadBytes` and close the connection.
 - `msg_type`: Message type identifier (see Section 4).
-- `flags`: Bitmask (`0x0001 = FLAG_RELATIVE_DELAY` indicating `timestamp_us` is a relative delay in µs rather than an absolute simulation timestamp; reserved bits MUST be `0`).
+- `flags`: Bitmask (`0x0001 = FLAG_RELATIVE_DELAY`, `0x0002 = FLAG_CANCEL`, `0x0004 = FLAG_ACK_REQUESTED`, `0x0008 = FLAG_CSMA_CA`, `0x0010 = FLAG_RESPONSE`; reserved bits MUST be `0`).
 - `timestamp_us`: Simulation timestamp in microseconds (or relative delay when `FLAG_RELATIVE_DELAY` is set).
 
 ---
@@ -105,3 +105,6 @@ Decoders MUST validate `offset + 4 + tlv_len <= payload_len` for every TLV and s
 | `0x0011` | `Capabilities` | `u32` bitmask |
 | `0x0012` | `NetAddr` | `u16 src_port`, `u16 dst_port`, `16B src_ip6`, `16B dst_ip6` |
 | `0x0013` | `Payload` | raw bytes (TREL / IPv6 / UDP) |
+| `0x0014` | `CcaThresholdDbm` | `i8` (dBm) |
+| `0x0015` | `StatusInfo` | `u8 role`, `u16 rloc16`, `u32 partition_id`, `8B ext_addr` |
+| `0x0016` | `AckPsdu` | raw ACK frame PSDU bytes |

@@ -28,6 +28,7 @@
 
 #include "protocol/rfsim_v3_codec.hpp"
 
+#include <cstring>
 #include <limits>
 
 namespace otns {
@@ -136,6 +137,47 @@ void Frame::AddVersion(uint16_t aMajor, uint16_t aMinor)
     mTlvs.push_back({TlvType::kVersion, std::move(bytes)});
 }
 
+void Frame::AddRadioState(uint8_t aState, uint8_t aSubState)
+{
+    uint8_t bytes[2] = {aState, aSubState};
+
+    AddBytes(TlvType::kRadioState, bytes, sizeof(bytes));
+}
+
+void Frame::AddParamKv(uint16_t aParamId, int32_t aValue)
+{
+    std::vector<uint8_t> bytes;
+
+    bytes.reserve(6);
+    AppendU16Le(bytes, aParamId);
+    AppendU32Le(bytes, static_cast<uint32_t>(aValue));
+    mTlvs.push_back({TlvType::kParamKv, std::move(bytes)});
+}
+
+void Frame::AddNetAddr(const NetAddrValue &aAddr)
+{
+    std::vector<uint8_t> bytes;
+
+    bytes.reserve(36);
+    AppendU16Le(bytes, aAddr.mSrcPort);
+    AppendU16Le(bytes, aAddr.mDstPort);
+    bytes.insert(bytes.end(), aAddr.mSrcIp6.begin(), aAddr.mSrcIp6.end());
+    bytes.insert(bytes.end(), aAddr.mDstIp6.begin(), aAddr.mDstIp6.end());
+    mTlvs.push_back({TlvType::kNetAddr, std::move(bytes)});
+}
+
+void Frame::AddStatusInfo(const StatusInfoValue &aInfo)
+{
+    std::vector<uint8_t> bytes;
+
+    bytes.reserve(15);
+    bytes.push_back(aInfo.mRole);
+    AppendU16Le(bytes, aInfo.mRloc16);
+    AppendU32Le(bytes, aInfo.mPartitionId);
+    bytes.insert(bytes.end(), aInfo.mExtAddr.begin(), aInfo.mExtAddr.end());
+    mTlvs.push_back({TlvType::kStatusInfo, std::move(bytes)});
+}
+
 void Frame::AddText(TlvType aType, const std::string &aText)
 {
     AddBytes(aType, reinterpret_cast<const uint8_t *>(aText.data()), aText.size());
@@ -178,6 +220,18 @@ std::optional<int8_t> Frame::GetI8(TlvType aType) const
     return static_cast<int8_t>(*value);
 }
 
+std::optional<uint16_t> Frame::GetU16(TlvType aType) const
+{
+    const Tlv *tlv = FindTlv(aType);
+
+    if (tlv == nullptr || tlv->mValue.size() != 2)
+    {
+        return std::nullopt;
+    }
+
+    return ReadU16Le(tlv->mValue.data());
+}
+
 std::optional<uint32_t> Frame::GetU32(TlvType aType) const
 {
     const Tlv *tlv = FindTlv(aType);
@@ -200,6 +254,95 @@ std::optional<uint64_t> Frame::GetU64(TlvType aType) const
     }
 
     return ReadU64Le(tlv->mValue.data());
+}
+
+std::optional<VersionValue> Frame::GetVersion(void) const
+{
+    const Tlv *tlv = FindTlv(TlvType::kVersion);
+
+    if (tlv == nullptr || tlv->mValue.size() != 4)
+    {
+        return std::nullopt;
+    }
+
+    VersionValue ver;
+
+    ver.mMajor = ReadU16Le(tlv->mValue.data());
+    ver.mMinor = ReadU16Le(tlv->mValue.data() + 2);
+
+    return ver;
+}
+
+std::optional<RadioStateValue> Frame::GetRadioState(void) const
+{
+    const Tlv *tlv = FindTlv(TlvType::kRadioState);
+
+    if (tlv == nullptr || tlv->mValue.size() != 2)
+    {
+        return std::nullopt;
+    }
+
+    RadioStateValue state;
+
+    state.mState    = tlv->mValue[0];
+    state.mSubState = tlv->mValue[1];
+
+    return state;
+}
+
+std::optional<ParamKvValue> Frame::GetParamKv(void) const
+{
+    const Tlv *tlv = FindTlv(TlvType::kParamKv);
+
+    if (tlv == nullptr || tlv->mValue.size() != 6)
+    {
+        return std::nullopt;
+    }
+
+    ParamKvValue kv;
+
+    kv.mParamId = ReadU16Le(tlv->mValue.data());
+    kv.mValue   = static_cast<int32_t>(ReadU32Le(tlv->mValue.data() + 2));
+
+    return kv;
+}
+
+std::optional<NetAddrValue> Frame::GetNetAddr(void) const
+{
+    const Tlv *tlv = FindTlv(TlvType::kNetAddr);
+
+    if (tlv == nullptr || tlv->mValue.size() != 36)
+    {
+        return std::nullopt;
+    }
+
+    NetAddrValue addr;
+
+    addr.mSrcPort = ReadU16Le(tlv->mValue.data());
+    addr.mDstPort = ReadU16Le(tlv->mValue.data() + 2);
+    std::memcpy(addr.mSrcIp6.data(), tlv->mValue.data() + 4, 16);
+    std::memcpy(addr.mDstIp6.data(), tlv->mValue.data() + 20, 16);
+
+    return addr;
+}
+
+std::optional<StatusInfoValue> Frame::GetStatusInfo(void) const
+{
+    const Tlv *tlv = FindTlv(TlvType::kStatusInfo);
+
+    if (tlv == nullptr || tlv->mValue.size() != 15)
+    {
+        return std::nullopt;
+    }
+
+    StatusInfoValue info;
+
+    info.mRole        = tlv->mValue[0];
+    info.mRloc16      = ReadU16Le(tlv->mValue.data() + 1);
+    info.mPartitionId = ReadU32Le(tlv->mValue.data() + 3);
+    std::memcpy(info.mExtAddr.data(), tlv->mValue.data() + 7, 8);
+
+    return info;
 }
 
 std::optional<std::string> Frame::GetText(TlvType aType) const

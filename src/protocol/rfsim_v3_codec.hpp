@@ -48,6 +48,9 @@ static constexpr uint32_t               kMaxPayloadBytes = 65536;
 
 static constexpr uint16_t kFlagRelativeDelay = 0x0001;
 static constexpr uint16_t kFlagCancel        = 0x0002;
+static constexpr uint16_t kFlagAckRequested  = 0x0004;
+static constexpr uint16_t kFlagCsmaCa        = 0x0008;
+static constexpr uint16_t kFlagResponse      = 0x0010;
 
 enum class MsgType : uint16_t
 {
@@ -74,25 +77,62 @@ enum class MsgType : uint16_t
 
 enum class TlvType : uint16_t
 {
-    kMagic          = 0x0001,
-    kVersion        = 0x0002,
-    kNodeId         = 0x0003,
-    kSeed           = 0x0004,
-    kChannel        = 0x0005,
-    kPowerDbm       = 0x0006,
-    kSensitivityDbm = 0x0007,
-    kDurationUs     = 0x0008,
-    kErrorCode      = 0x0009,
-    kMsgId          = 0x000A,
-    kRadioState     = 0x000B,
-    kPsdu           = 0x000C,
-    kLqi            = 0x000D,
-    kText           = 0x000E,
-    kExtAddr        = 0x000F,
-    kParamKv        = 0x0010,
-    kCapabilities   = 0x0011,
-    kNetAddr        = 0x0012,
-    kPayload        = 0x0013,
+    kMagic           = 0x0001,
+    kVersion         = 0x0002,
+    kNodeId          = 0x0003,
+    kSeed            = 0x0004,
+    kChannel         = 0x0005,
+    kPowerDbm        = 0x0006,
+    kSensitivityDbm  = 0x0007,
+    kDurationUs      = 0x0008,
+    kErrorCode       = 0x0009,
+    kMsgId           = 0x000A,
+    kRadioState      = 0x000B,
+    kPsdu            = 0x000C,
+    kLqi             = 0x000D,
+    kText            = 0x000E,
+    kExtAddr         = 0x000F,
+    kParamKv         = 0x0010,
+    kCapabilities    = 0x0011,
+    kNetAddr         = 0x0012,
+    kPayload         = 0x0013,
+    kCcaThresholdDbm = 0x0014,
+    kStatusInfo      = 0x0015,
+    kAckPsdu         = 0x0016,
+};
+
+struct VersionValue
+{
+    uint16_t mMajor = 0;
+    uint16_t mMinor = 0;
+};
+
+struct RadioStateValue
+{
+    uint8_t mState    = 0;
+    uint8_t mSubState = 0;
+};
+
+struct ParamKvValue
+{
+    uint16_t mParamId = 0;
+    int32_t  mValue   = 0;
+};
+
+struct NetAddrValue
+{
+    uint16_t                mSrcPort = 0;
+    uint16_t                mDstPort = 0;
+    std::array<uint8_t, 16> mSrcIp6  = {};
+    std::array<uint8_t, 16> mDstIp6  = {};
+};
+
+struct StatusInfoValue
+{
+    uint8_t                mRole        = 0;
+    uint16_t               mRloc16      = 0xFFFE;
+    uint32_t               mPartitionId = 0;
+    std::array<uint8_t, 8> mExtAddr     = {};
 };
 
 struct Tlv
@@ -110,14 +150,24 @@ struct Frame
     void AddU32(TlvType aType, uint32_t aValue);
     void AddU64(TlvType aType, uint64_t aValue);
     void AddVersion(uint16_t aMajor, uint16_t aMinor);
+    void AddRadioState(uint8_t aState, uint8_t aSubState);
+    void AddParamKv(uint16_t aParamId, int32_t aValue);
+    void AddNetAddr(const NetAddrValue &aAddr);
+    void AddStatusInfo(const StatusInfoValue &aInfo);
     void AddText(TlvType aType, const std::string &aText);
 
-    const Tlv                 *FindTlv(TlvType aType) const;
-    std::optional<uint8_t>     GetU8(TlvType aType) const;
-    std::optional<int8_t>      GetI8(TlvType aType) const;
-    std::optional<uint32_t>    GetU32(TlvType aType) const;
-    std::optional<uint64_t>    GetU64(TlvType aType) const;
-    std::optional<std::string> GetText(TlvType aType) const;
+    const Tlv                     *FindTlv(TlvType aType) const;
+    std::optional<uint8_t>         GetU8(TlvType aType) const;
+    std::optional<int8_t>          GetI8(TlvType aType) const;
+    std::optional<uint16_t>        GetU16(TlvType aType) const;
+    std::optional<uint32_t>        GetU32(TlvType aType) const;
+    std::optional<uint64_t>        GetU64(TlvType aType) const;
+    std::optional<VersionValue>    GetVersion(void) const;
+    std::optional<RadioStateValue> GetRadioState(void) const;
+    std::optional<ParamKvValue>    GetParamKv(void) const;
+    std::optional<NetAddrValue>    GetNetAddr(void) const;
+    std::optional<StatusInfoValue> GetStatusInfo(void) const;
+    std::optional<std::string>     GetText(TlvType aType) const;
 
     MsgType          mType        = MsgType::kHello;
     uint16_t         mFlags       = 0;

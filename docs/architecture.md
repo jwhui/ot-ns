@@ -47,8 +47,8 @@ OTNS v3 addresses all four via a ground-up **C++17** architecture with **layered
 
 ## 4. Roadmap
 
-- **Milestone 1 (Current)**: `v3` branch & RFC docs, CMake C++17 build with ASan/UBSan, `libotns_rf` (PRNG, spatial index, Ideal & MutualInterference), `libotns_protocol` binary/TLV codec, `libotns` event scheduler + in-process multi-instance OpenThread nodes, multi-node formation/ping tests, and 100-node scale benchmark.
-- **Milestone 2**: `ot-rfsim` v3 platform (standalone + Matter library mode), `RfSimNode` socket server, real-time pacing, TREL/infra-if/host networking, PCAP/WPAN-TAP, KPI, JSON topologies.
-- **Milestone 3**: Embedded HTTP/1.1 + WebSocket server, JSON-RPC control plane, coalesced `VizPublisher`, JSONL replay, interactive CLI, Vite + TS Canvas 2D web visualizer, Python SDK + `pytest` suite.
+- **Milestone 1 (Complete)**: `v3` branch & RFC docs, CMake C++17 build with OpenThread host-C++ style & ASan/UBSan, `libotns_rf`, `libotns_protocol` binary/TLV codec, `libotns` scheduler + in-process multi-instance OpenThread nodes, multi-node formation/ping tests, and 100-node scale benchmark.
+- **Milestone 2 (Complete)**: `ot-rfsim` v3 platform (`openthread-rfsim-v3` library mode + `ot-cli-ftd-rfsim` standalone binary), `RfSimServer`/`RfSimNode` Unix & TCP socket bridge with lock-step virtual time, real-time clock pacing, virtual TREL/Infra-If/Host UDP fabric, PCAP/WPAN-TAP writer, 802.15.4 dissector, KPI JSON tracker, JSON topology save/load with output path containment, and hybrid in-process + external node tests.
+- **Milestone 3 (Next)**: Embedded HTTP/1.1 + WebSocket server, JSON-RPC control plane, coalesced `VizPublisher`, JSONL replay, interactive CLI, Vite + TS Canvas 2D web visualizer, Python SDK + `pytest` suite.
 - **Milestone 4**: Cross-platform CI (Linux x86_64/arm64, macOS Apple Silicon, ASan/UBSan), Docker playground, Matter & OTBR smoke tests, Nexus WebSocket observer PR in `openthread`, community cutover.
 - **Phase 2 (Post-MVP)**: Energy profiling & charts, optional YAML topology loader, legacy OT v1.1–1.3 build matrix.

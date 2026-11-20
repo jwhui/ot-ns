@@ -46,6 +46,24 @@ TEST_CASE("rfsim v3 frame encode and decode round-trip")
     tx.AddU32(TlvType::kNodeId, 7);
     tx.AddI8(TlvType::kPowerDbm, -12);
     tx.AddText(TlvType::kText, "matter-light-1");
+    tx.AddRadioState(2, 1);
+    tx.AddParamKv(42, -95);
+
+    NetAddrValue netAddr;
+
+    netAddr.mSrcPort    = 5001;
+    netAddr.mDstPort    = 5002;
+    netAddr.mSrcIp6[0]  = 0xFD;
+    netAddr.mDstIp6[15] = 0x09;
+    tx.AddNetAddr(netAddr);
+
+    StatusInfoValue statusInfo;
+
+    statusInfo.mRole        = 4;
+    statusInfo.mRloc16      = 0x2400;
+    statusInfo.mPartitionId = 0x12345678u;
+    statusInfo.mExtAddr     = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07};
+    tx.AddStatusInfo(statusInfo);
 
     CHECK(EncodeFrame(tx, wire));
     if (wire.size() <= 4)
@@ -62,13 +80,53 @@ TEST_CASE("rfsim v3 frame encode and decode round-trip")
     CHECK(res.mStatus == DecodeStatus::kOk);
     if (res.mStatus == DecodeStatus::kOk)
     {
+        auto ver    = res.mFrame.GetVersion();
+        auto rs     = res.mFrame.GetRadioState();
+        auto kv     = res.mFrame.GetParamKv();
+        auto addr   = res.mFrame.GetNetAddr();
+        auto status = res.mFrame.GetStatusInfo();
+
         CHECK(res.mBytesConsumed == wire.size());
         CHECK(res.mFrame.mType == MsgType::kHello);
         CHECK(res.mFrame.mFlags == kFlagRelativeDelay);
         CHECK(res.mFrame.mTimestampUs == 123456789ULL);
+        CHECK(ver.has_value());
+        if (ver.has_value())
+        {
+            CHECK(ver->mMajor == kProtocolMajor);
+            CHECK(ver->mMinor == kProtocolMinor);
+        }
         CHECK(res.mFrame.GetU32(TlvType::kNodeId) == 7u);
         CHECK(res.mFrame.GetI8(TlvType::kPowerDbm) == -12);
         CHECK(res.mFrame.GetText(TlvType::kText) == "matter-light-1");
+        CHECK(rs.has_value());
+        if (rs.has_value())
+        {
+            CHECK(rs->mState == 2);
+            CHECK(rs->mSubState == 1);
+        }
+        CHECK(kv.has_value());
+        if (kv.has_value())
+        {
+            CHECK(kv->mParamId == 42);
+            CHECK(kv->mValue == -95);
+        }
+        CHECK(addr.has_value());
+        if (addr.has_value())
+        {
+            CHECK(addr->mSrcPort == 5001);
+            CHECK(addr->mDstPort == 5002);
+            CHECK(addr->mSrcIp6[0] == 0xFD);
+            CHECK(addr->mDstIp6[15] == 0x09);
+        }
+        CHECK(status.has_value());
+        if (status.has_value())
+        {
+            CHECK(status->mRole == 4);
+            CHECK(status->mRloc16 == 0x2400);
+            CHECK(status->mPartitionId == 0x12345678u);
+            CHECK(status->mExtAddr[7] == 0x07);
+        }
     }
 }
 

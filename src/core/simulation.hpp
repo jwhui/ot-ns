@@ -30,6 +30,7 @@
 #define OTNS_CORE_SIMULATION_HPP_
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -37,8 +38,12 @@
 #include <string>
 #include <vector>
 
+#include "core/kpi_tracker.hpp"
+#include "core/net_fabric.hpp"
+#include "core/pcap_writer.hpp"
 #include "core/scheduler.hpp"
 #include "core/sim_node.hpp"
+#include "core/topology.hpp"
 #include "rf/prng.hpp"
 #include "rf/radio_model.hpp"
 
@@ -52,6 +57,7 @@ struct SimulationConfig
     uint16_t             mPanId      = 0xFACE;
     Rf::ChannelId        mChannel    = Rf::kMinChannel;
     std::string          mNetworkKey = "00112233445566778899aabbccddeeff";
+    double               mSpeed      = 0.0; // 0.0 = max speed (unpaced); 1.0 = real-time
 };
 
 struct SimulationStats
@@ -84,6 +90,8 @@ public:
     Simulation &operator=(const Simulation &) = delete;
 
     Rf::NodeId                  AddNode(const NodeConfig &aConfig = {});
+    Rf::NodeId                  RegisterExternalNode(std::unique_ptr<SimNode> aNode, const NodeConfig &aConfig);
+    Rf::NodeId                  AllocateNodeId(Rf::NodeId aPreferredId = Rf::kInvalidNodeId);
     bool                        RemoveNode(Rf::NodeId aId);
     bool                        MoveNode(Rf::NodeId aId, Rf::Position3D aPos);
     bool                        SetNodeEnabled(Rf::NodeId aId, bool aEnabled);
@@ -91,10 +99,32 @@ public:
     std::string                 TakeCliOutput(Rf::NodeId aId);
     std::optional<NodeSnapshot> GetNodeSnapshot(Rf::NodeId aId) const;
     std::vector<NodeSnapshot>   GetAllNodeSnapshots(void) const;
+    SimNode                    *GetNode(Rf::NodeId aId);
 
     void     AdvanceUs(uint64_t aDurationUs);
     void     AdvanceSec(double aSeconds);
+    void     AdvancePacedUs(uint64_t aDurationUs, double aSpeed);
+    void     SetSpeed(double aSpeed) { mConfig.mSpeed = (aSpeed >= 0.0) ? aSpeed : 0.0; }
+    double   GetSpeed(void) const { return mConfig.mSpeed; }
     uint64_t GetNowUs(void) const { return mScheduler.GetNowUs(); }
+
+    // Observability: PCAP / WPAN-TAP, KPI, Topology
+    bool              StartPcapContained(const std::filesystem::path &aBaseDir,
+                                         const std::string           &aRequestedPath,
+                                         PcapFormat                   aFormat = PcapFormat::kWpanTap);
+    void              StopPcap(void);
+    PcapWriter       &GetPcapWriter(void) { return mPcapWriter; }
+    KpiTracker       &GetKpiTracker(void) { return mKpiTracker; }
+    const KpiTracker &GetKpiTracker(void) const { return mKpiTracker; }
+
+    TopologySpec ExportTopology(void) const;
+    bool         LoadTopology(const TopologySpec &aSpec);
+
+    // Virtual Backbone Fabric (TREL / Infra-If / Host UDP)
+    NetFabric &GetNetFabric(void) { return mNetFabric; }
+    void       SendTrelPacket(const NetPacket &aPacket);
+    void       SendInfraIfPacket(const NetPacket &aPacket);
+    void       SendHostUdpPacket(const NetPacket &aPacket);
 
     SimulationStats         GetStats(void) const;
     Scheduler              &GetScheduler(void) { return mScheduler; }
@@ -143,11 +173,15 @@ private:
     Scheduler                                      mScheduler;
     Rf::RadioModel                                 mRadioModel;
     Rf::Prng                                       mPlatformPrng;
+    PcapWriter                                     mPcapWriter;
+    KpiTracker                                     mKpiTracker;
+    NetFabric                                      mNetFabric;
     Rf::NodeId                                     mNextNodeId         = 1;
     bool                                           mHasPendingTasklets = false;
     uint64_t                                       mStatTxFrames       = 0;
     uint64_t                                       mStatRxOk           = 0;
     uint64_t                                       mStatRxFcsErr       = 0;
+    std::map<Rf::NodeId, NodeConfig>               mNodeConfigs;
     std::map<Rf::NodeId, std::unique_ptr<SimNode>> mNodes;
 };
 

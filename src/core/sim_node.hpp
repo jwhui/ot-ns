@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "core/net_fabric.hpp"
 #include "rf/types.hpp"
 
 namespace otns {
@@ -117,6 +118,11 @@ public:
     virtual NodeSnapshot GetSnapshot(void) const = 0;
 
     virtual bool OnRadioRxDone(const RawFrame &aRxFrame, RawFrame &aAckOut) = 0;
+
+    // Optional virtual backbone delivery hooks (TREL / Infra-If / Host UDP).
+    virtual void OnTrelPacket(const NetPacket &aPacket) { (void)aPacket; }
+    virtual void OnInfraIfPacket(const NetPacket &aPacket) { (void)aPacket; }
+    virtual void OnHostUdpPacket(const NetPacket &aPacket) { (void)aPacket; }
 };
 
 } // namespace Core

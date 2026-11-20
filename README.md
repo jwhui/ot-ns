@@ -11,7 +11,7 @@ OTNS v3 is a C++17 discrete-event Thread network simulator and visualizer design
 
 ## Quick Start (Headless C++17 Build & Tests)
 
-Prerequisites: CMake ≥ 3.20, Ninja, C++17 compiler (GCC or Clang). Headless builds require **zero Node.js**.
+Prerequisites: CMake ≥ 3.24, Ninja, C++17 compiler (GCC or Clang). Headless builds require **zero Node.js**.
 
 ```bash
 cmake -S . -B build -G Ninja -DOTNS_ENABLE_SANITIZERS=ON
